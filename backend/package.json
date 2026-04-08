@@ -2,6 +2,9 @@
   "name": "nurse-logging-backend",
   "version": "1.0.0",
   "private": true,
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "ts-node-dev --respawn src/index.ts",
     "build": "tsc",
