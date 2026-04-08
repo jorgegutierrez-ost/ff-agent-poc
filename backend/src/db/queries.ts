@@ -235,3 +235,26 @@ export async function getNarrative(visitId: string): Promise<Narrative | null> {
   );
   return rows[0] ?? null;
 }
+
+// ─── Scheduled Tasks ─────────────────────────────────────────
+
+export interface ScheduledTaskRow {
+  id: string;
+  patient_id: string;
+  type: string;
+  label: string;
+  sublabel: string | null;
+  scheduled_time: string;
+  sort_order: number;
+}
+
+export async function getScheduledTasks(patientId: string): Promise<ScheduledTaskRow[]> {
+  const { rows } = await pool.query(
+    `SELECT id, patient_id, type, label, sublabel, scheduled_time::text, sort_order
+     FROM scheduled_tasks
+     WHERE patient_id = $1
+     ORDER BY sort_order`,
+    [patientId],
+  );
+  return rows;
+}

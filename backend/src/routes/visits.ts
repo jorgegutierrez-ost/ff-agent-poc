@@ -13,6 +13,7 @@ import {
   saveIntervention,
   saveMedication,
   upsertNarrative,
+  getScheduledTasks,
 } from '../db/queries';
 
 const HARDCODED_NURSE_ID = '00000000-0000-0000-0000-000000000001';
@@ -65,6 +66,24 @@ router.get('/:visitId/history', async (req, res) => {
   } catch (err) {
     console.error('[visits/history] Error:', err);
     res.status(500).json({ error: 'Failed to fetch history' });
+  }
+});
+
+// ─── Scheduled tasks for a patient ───────────────────────────
+
+router.get('/:visitId/schedule', async (req, res) => {
+  try {
+    const { visitId } = req.params;
+    const visitData = await getVisitWithPatient(visitId);
+    if (!visitData) {
+      res.status(404).json({ error: 'Visit not found' });
+      return;
+    }
+    const tasks = await getScheduledTasks(visitData.patient.id);
+    res.json(tasks);
+  } catch (err) {
+    console.error('[visits/schedule] Error:', err);
+    res.status(500).json({ error: 'Failed to fetch schedule' });
   }
 });
 

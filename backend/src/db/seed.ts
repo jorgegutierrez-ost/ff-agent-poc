@@ -117,5 +117,37 @@ export async function seed(): Promise<void> {
     );
   }
 
+  // Scheduled tasks per patient (care plan)
+  const SCHEDULED_TASKS = [
+    // ── Carlos Mendoza (5mo infant, PDN) ──
+    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'vitals', label: 'Vital signs check', sublabel: 'Weight, temp, HR, RR, O2 sat', scheduled_time: '08:00', sort_order: 1 },
+    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'medication', label: 'Ranitidine 15mg', sublabel: 'Oral · Twice daily', scheduled_time: '08:15', sort_order: 2 },
+    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'intervention', label: 'Tracheostomy suctioning', sublabel: 'PRN · Check airway patency', scheduled_time: '08:30', sort_order: 3 },
+    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'intervention', label: 'Trach site care', sublabel: 'Clean and assess stoma site', scheduled_time: '08:30', sort_order: 4 },
+    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'medication', label: 'Albuterol 1.25mg', sublabel: 'Nebulizer · Every 6h', scheduled_time: '08:45', sort_order: 5 },
+    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'intervention', label: 'G-tube feeding', sublabel: 'Formula per dietitian orders', scheduled_time: '08:50', sort_order: 6 },
+    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'narrative', label: 'Visit narrative', sublabel: 'Document findings and plan', scheduled_time: '08:55', sort_order: 7 },
+
+    // ── Liam O'Brien (4yo, cerebral palsy) ──
+    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'vitals', label: 'Vital signs check', sublabel: 'Temp, HR, RR, O2 sat, pain scale', scheduled_time: '13:00', sort_order: 1 },
+    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'medication', label: 'Baclofen 5mg', sublabel: 'Oral · Three times daily', scheduled_time: '13:15', sort_order: 2 },
+    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'medication', label: 'Diazepam 2mg', sublabel: 'Oral · Twice daily', scheduled_time: '13:15', sort_order: 3 },
+    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'intervention', label: 'Range of motion exercises', sublabel: 'Upper and lower extremities', scheduled_time: '13:30', sort_order: 4 },
+    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'intervention', label: 'Positioning and skin check', sublabel: 'Reposition · Assess pressure areas', scheduled_time: '13:30', sort_order: 5 },
+    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'medication', label: 'Glycopyrrolate 1mg', sublabel: 'Oral · Three times daily', scheduled_time: '13:45', sort_order: 6 },
+    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'narrative', label: 'Visit narrative', sublabel: 'Document findings and plan', scheduled_time: '13:55', sort_order: 7 },
+  ];
+
+  for (const t of SCHEDULED_TASKS) {
+    await pool.query(
+      `INSERT INTO scheduled_tasks (patient_id, type, label, sublabel, scheduled_time, sort_order)
+       SELECT $1, $2, $3, $4, $5, $6
+       WHERE NOT EXISTS (
+         SELECT 1 FROM scheduled_tasks WHERE patient_id = $1 AND label = $3 AND scheduled_time = $5
+       )`,
+      [t.patient_id, t.type, t.label, t.sublabel, t.scheduled_time, t.sort_order],
+    );
+  }
+
   console.log('[seed] Database seeded successfully');
 }

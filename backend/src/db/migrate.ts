@@ -92,6 +92,18 @@ CREATE TABLE IF NOT EXISTS narratives (
   updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  patient_id      UUID NOT NULL REFERENCES patients(id),
+  type            TEXT NOT NULL CHECK (type IN ('medication','intervention','vitals','narrative')),
+  label           TEXT NOT NULL,
+  sublabel        TEXT,
+  scheduled_time  TIME NOT NULL,
+  sort_order      INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_patient ON scheduled_tasks(patient_id, sort_order);
+
 CREATE TABLE IF NOT EXISTS conversation_messages (
   id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   visit_id    UUID NOT NULL REFERENCES visits(id),

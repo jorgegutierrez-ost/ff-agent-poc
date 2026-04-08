@@ -70,10 +70,71 @@ export default function VisitPage({
   onToolCall,
   onGoBack,
 }: VisitPageProps) {
-  const [scheduleItems, setScheduleItems] = useState<ScheduleItem[]>(
-    () => [],
+  const [scheduleItems, setScheduleItems] = useState<ScheduleItem[]>([],
   );
   const [activeForm, setActiveForm] = useState<ActiveForm | null>(null);
+
+  // Load scheduled tasks from backend
+  useEffect(() => {
+    fetch(`${API_BASE}/api/visits/${visit.id}/schedule`)
+      .then((r) => {
+        if (!r.ok) throw new Error();
+        return r.json();
+      })
+      .then((tasks: Array<{ id: string; type: string; label: string; sublabel: string | null; scheduled_time: string }>) => {
+        const quickActionsForType = (type: string): ScheduleItem['quickActions'] => {
+          switch (type) {
+            case 'vitals':
+              return [
+                { label: 'Record vitals', value: 'record_vitals', variant: 'primary' },
+                { label: 'Skipped', value: 'skip_vitals', variant: 'secondary' },
+              ];
+            case 'medication':
+              return [
+                { label: 'Yes, given', value: 'med_given', variant: 'primary' },
+                { label: 'Skipped', value: 'med_skipped', variant: 'secondary' },
+                { label: 'Modified', value: 'med_modified', variant: 'secondary' },
+              ];
+            case 'intervention':
+              return [
+                { label: 'Done', value: 'intervention_done', variant: 'primary' },
+                { label: 'Not needed', value: 'intervention_skip', variant: 'secondary' },
+              ];
+            case 'narrative':
+              return [
+                { label: 'Write narrative', value: 'write_narrative', variant: 'primary' },
+              ];
+            default:
+              return [];
+          }
+        };
+
+        // Determine if overdue (scheduled time is before now)
+        const now = new Date();
+        const nowMinutes = now.getHours() * 60 + now.getMinutes();
+
+        setScheduleItems(
+          tasks.map((t) => {
+            const [h, m] = t.scheduled_time.split(':').map(Number);
+            const taskMinutes = h * 60 + m;
+            const isOverdue = taskMinutes < nowMinutes;
+            const lateMinutes = isOverdue ? nowMinutes - taskMinutes : undefined;
+
+            return {
+              id: t.id,
+              type: t.type as ScheduleItem['type'],
+              status: isOverdue ? 'overdue' : 'pending',
+              scheduledTime: t.scheduled_time,
+              label: t.label,
+              sublabel: t.sublabel ?? '',
+              lateMinutes,
+              quickActions: quickActionsForType(t.type),
+            };
+          }),
+        );
+      })
+      .catch(() => {});
+  }, [visit.id]);
 
   const totalItems = scheduleItems.length;
   const completedCount = scheduleItems.filter(
