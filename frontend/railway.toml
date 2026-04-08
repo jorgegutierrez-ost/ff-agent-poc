@@ -1,7 +1,6 @@
 [build]
 builder = "NIXPACKS"
 buildCommand = "npm install --prefer-offline && npm run build"
-nixpacksConfigPath = "frontend/nixpacks.toml"
 
 [deploy]
 startCommand = "npx serve dist -s -l ${PORT:-3000}"
