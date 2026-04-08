@@ -152,9 +152,17 @@ export default function ChatPanel({
     <div className="flex h-full w-[70%] shrink-0 flex-col border-l border-gray-200 bg-white">
       {/* Header */}
       <div className="flex items-center justify-between border-b border-gray-200 px-5 py-3">
-        <h3 className="text-[11px] font-semibold tracking-widest text-gray-400 uppercase">
-          Assistant
-        </h3>
+        <div className="flex items-center gap-2.5">
+          <img
+            src="/aria-avatar.png"
+            alt="Aria"
+            className="h-8 w-8 rounded-full object-cover ring-2 ring-white"
+          />
+          <div>
+            <h3 className="text-sm font-semibold text-gray-900">Aria</h3>
+            <p className="text-[10px] text-gray-400">AI Documentation Assistant</p>
+          </div>
+        </div>
         {/* Speaker toggle */}
         <button
           onClick={() => setAutoSpeak(!autoSpeak)}
@@ -193,21 +201,11 @@ export default function ChatPanel({
 
                 {msg.role === 'agent' ? (
                   <div className="flex gap-2.5">
-                    <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gray-100">
-                      <svg
-                        className="h-3.5 w-3.5 text-gray-500"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
-                        strokeWidth={1.5}
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 0 0-2.455 2.456Z"
-                        />
-                      </svg>
-                    </div>
+                    <img
+                      src="/aria-avatar.png"
+                      alt="Aria"
+                      className="mt-0.5 h-7 w-7 shrink-0 rounded-full object-cover"
+                    />
                     <div className="prose prose-sm min-w-0 max-w-none flex-1 text-gray-800 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-strong:text-gray-900 prose-headings:text-gray-900 prose-headings:text-sm prose-headings:mt-2 prose-headings:mb-1">
                       <ReactMarkdown>{msg.content}</ReactMarkdown>
                     </div>
@@ -228,9 +226,12 @@ export default function ChatPanel({
 
           {/* Tool call indicator */}
           {activeToolCall && (
-            <div className="flex items-center gap-2 text-xs text-gray-400">
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-gray-600" />
-              <span>{activeToolCall}...</span>
+            <div className="flex items-center gap-2.5 text-xs text-gray-400">
+              <img src="/aria-avatar.png" alt="Aria" className="h-5 w-5 rounded-full object-cover opacity-60" />
+              <div className="flex items-center gap-1.5">
+                <div className="h-3 w-3 animate-spin rounded-full border-[1.5px] border-gray-300 border-t-gray-600" />
+                <span>Aria is {activeToolCall.toLowerCase()}...</span>
+              </div>
             </div>
           )}
 
@@ -239,8 +240,10 @@ export default function ChatPanel({
             !activeToolCall &&
             messages.length > 0 &&
             messages[messages.length - 1]?.role === 'agent' && (
-              <div className="flex justify-start pl-9">
-                <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-gray-400" />
+              <div className="flex items-center gap-2 pl-9">
+                <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-gray-400" />
+                <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-gray-300" style={{ animationDelay: '0.2s' }} />
+                <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-gray-200" style={{ animationDelay: '0.4s' }} />
               </div>
             )}
 
@@ -252,9 +255,10 @@ export default function ChatPanel({
       <div className="border-t border-gray-200 bg-gray-50 px-6 py-6">
         {/* TTS playing bar */}
         {tts.isPlaying && (
-          <div className="mb-4 flex items-center justify-center gap-2">
+          <div className="mb-4 flex items-center justify-center gap-2.5">
+            <img src="/aria-avatar.png" alt="Aria" className="h-6 w-6 rounded-full object-cover" />
             <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-indigo-500" />
-            <span className="text-sm text-indigo-500">Speaking...</span>
+            <span className="text-sm text-indigo-500">Aria is speaking...</span>
             <button
               onClick={tts.stop}
               className="ml-1 rounded-lg border border-indigo-200 px-2.5 py-1 text-xs text-indigo-600 hover:bg-indigo-50"
@@ -267,10 +271,13 @@ export default function ChatPanel({
         {recorder.isTranscribing ? (
           /* ── Transcribing ── */
           <div className="flex flex-col items-center gap-4 py-6">
-            <div className="flex h-24 w-24 items-center justify-center rounded-full bg-white shadow-md">
-              <div className="h-8 w-8 animate-spin rounded-full border-[3px] border-gray-200 border-t-gray-700" />
+            <div className="relative">
+              <img src="/aria-avatar.png" alt="Aria" className="h-20 w-20 rounded-full object-cover shadow-md" />
+              <div className="absolute inset-0 flex items-center justify-center rounded-full bg-white/60">
+                <div className="h-8 w-8 animate-spin rounded-full border-[3px] border-gray-200 border-t-gray-700" />
+              </div>
             </div>
-            <span className="text-sm font-medium text-gray-600">Processing your voice...</span>
+            <span className="text-sm font-medium text-gray-600">Aria is processing your voice...</span>
           </div>
         ) : recorder.isRecording ? (
           /* ── Listening mode ── */
