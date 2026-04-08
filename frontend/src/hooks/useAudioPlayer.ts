@@ -23,12 +23,16 @@ export function useAudioPlayer() {
         signal: controller.signal,
       });
 
-      if (!res.ok || !res.body) return;
+      // Bail silently if TTS fails — don't waste user attention on it
+      if (!res.ok) return;
 
-      // Create a blob from the streamed audio
+      const contentType = res.headers.get('content-type') ?? '';
+      if (!contentType.includes('audio')) return;
+
       const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
+      if (blob.size < 100) return; // too small to be real audio
 
+      const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
       audioRef.current = audio;
       setIsPlaying(true);
@@ -46,10 +50,8 @@ export function useAudioPlayer() {
       };
 
       await audio.play();
-    } catch (err) {
-      if ((err as Error).name !== 'AbortError') {
-        console.error('[tts] Playback failed:', err);
-      }
+    } catch {
+      // Fail silently — TTS is optional
       setIsPlaying(false);
     }
   }, []);
