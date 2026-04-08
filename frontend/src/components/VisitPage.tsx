@@ -64,29 +64,6 @@ export default function VisitPage({
   ).length;
   const progressPct = totalItems > 0 ? (completedCount / totalItems) * 100 : 0;
 
-  // Mark a schedule item as completed
-  const markItemCompleted = useCallback(
-    (itemId: string, action: string) => {
-      setScheduleItems((prev) =>
-        prev.map((si) =>
-          si.id === itemId
-            ? {
-                ...si,
-                status: 'completed' as const,
-                completedAt: new Date().toLocaleTimeString('en-US', {
-                  hour: '2-digit',
-                  minute: '2-digit',
-                  hour12: false,
-                }),
-                completedAction: action,
-              }
-            : si,
-        ),
-      );
-    },
-    [],
-  );
-
   // Listen for agent tool calls and match them to schedule items
   useEffect(() => {
     onToolCall((tool: string, input: Record<string, unknown>) => {
