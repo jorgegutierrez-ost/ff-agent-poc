@@ -4,7 +4,6 @@ import type { ActiveForm } from './ChatPanel';
 import { API_BASE } from '../config';
 import VisitSchedule from './VisitSchedule';
 import ChatPanel from './ChatPanel';
-import { MOCK_SCHEDULES } from '../mockSchedule';
 
 interface VisitPageProps {
   patient: Patient;
@@ -72,7 +71,7 @@ export default function VisitPage({
   onGoBack,
 }: VisitPageProps) {
   const [scheduleItems, setScheduleItems] = useState<ScheduleItem[]>(
-    () => MOCK_SCHEDULES[patient.id] ?? [],
+    () => [],
   );
   const [activeForm, setActiveForm] = useState<ActiveForm | null>(null);
 

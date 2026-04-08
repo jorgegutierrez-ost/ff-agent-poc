@@ -111,9 +111,6 @@ export function useChat() {
       try {
         ws = new WebSocket(WS_URL);
       } catch {
-        if (!hasHistory) {
-          mockStartVisit(patientId);
-        }
         return;
       }
 
@@ -132,11 +129,7 @@ export function useChat() {
         handleServerMessage(msg);
       };
 
-      ws.onerror = () => {
-        if (!hasHistory) {
-          mockStartVisit(patientId);
-        }
-      };
+      ws.onerror = () => {};
 
       ws.onclose = () => {
         setIsStreaming(false);
@@ -264,66 +257,7 @@ export function useChat() {
           content: content.trim(),
         }),
       );
-    } else {
-      mockAgentReply(content.trim());
     }
-  }, []);
-
-  // --- Mock helpers for when backend is unavailable ---
-
-  const mockStartVisit = useCallback((patientId: string) => {
-    setIsStreaming(true);
-    const patientNames: Record<string, string> = {
-      '10000000-0000-0000-0000-000000000001': 'Carlos Mendoza',
-      '10000000-0000-0000-0000-000000000002': 'Dorothy Hargrove',
-      '10000000-0000-0000-0000-000000000003': "Liam O'Brien",
-    };
-    const name = patientNames[patientId] || 'this patient';
-    const greeting = `Good morning! I see you're visiting ${name} today. Let's get the visit documented. Can you start by telling me the vital signs you've taken?`;
-    streamMockMessage(greeting);
-  }, []);
-
-  const mockAgentReply = useCallback((nurseMsg: string) => {
-    setIsStreaming(true);
-    const lower = nurseMsg.toLowerCase();
-
-    if (lower.includes('bp') || lower.includes('blood pressure') || lower.includes('vitals') || lower.includes('heart rate') || lower.includes('temp')) {
-      setTimeout(() => {
-        setActiveToolCall('Logging vitals');
-        setSummary((prev) => ({
-          ...prev,
-          vitals: { bp_systolic: 118, bp_diastolic: 76, heart_rate: 92, temperature_f: 98.6, o2_saturation: 97, respiratory_rate: 18, pain_score: 2 },
-        }));
-        setTimeout(() => setActiveToolCall(null), 500);
-      }, 300);
-      streamMockMessage("Got it - I've logged those vitals. Everything looks within normal range. Now, were there any interventions or procedures you performed during this visit?");
-    } else {
-      streamMockMessage("I've noted that. What else can I help document for this visit?");
-    }
-  }, []);
-
-  const streamMockMessage = useCallback((text: string) => {
-    streamBufferRef.current = '';
-    const id = `stream-${Date.now()}`;
-    let i = 0;
-    const interval = setInterval(() => {
-      if (i < text.length) {
-        const chunkSize = Math.floor(Math.random() * 3) + 1;
-        streamBufferRef.current += text.slice(i, i + chunkSize);
-        i += chunkSize;
-        setMessages((prev) => {
-          const last = prev[prev.length - 1];
-          if (last && last.id === id) {
-            return [...prev.slice(0, -1), { ...last, content: streamBufferRef.current }];
-          }
-          return [...prev, { id, role: 'agent' as const, content: streamBufferRef.current, timestamp: new Date() }];
-        });
-      } else {
-        clearInterval(interval);
-        setIsStreaming(false);
-        streamBufferRef.current = '';
-      }
-    }, 20);
   }, []);
 
   const progress = calculateProgress(summary);

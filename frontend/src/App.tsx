@@ -2,15 +2,14 @@ import { useState, useEffect, useCallback } from 'react';
 import PatientListPage from './components/PatientListPage';
 import VisitPage from './components/VisitPage';
 import { useChat } from './hooks/useChat';
-import { MOCK_PATIENTS, MOCK_VISITS } from './mockData';
 import { API_BASE } from './config';
 import type { Patient, Visit } from './types';
 
 type Page = 'patients' | 'visit';
 
 export default function App() {
-  const [patients, setPatients] = useState<Patient[]>(MOCK_PATIENTS);
-  const [visits, setVisits] = useState<Visit[]>(MOCK_VISITS);
+  const [patients, setPatients] = useState<Patient[]>([]);
+  const [visits, setVisits] = useState<Visit[]>([]);
   const [page, setPage] = useState<Page>('patients');
   const [activePatientId, setActivePatientId] = useState<string | null>(null);
 
@@ -24,7 +23,6 @@ export default function App() {
     onToolCall,
   } = useChat();
 
-  // Try to fetch from backend, fall back to mock data
   useEffect(() => {
     fetch(`${API_BASE}/api/patients`)
       .then((r) => {
@@ -32,7 +30,7 @@ export default function App() {
         return r.json();
       })
       .then(setPatients)
-      .catch(() => setPatients(MOCK_PATIENTS));
+      .catch(() => {});
 
     fetch(`${API_BASE}/api/visits`)
       .then((r) => {
@@ -40,7 +38,7 @@ export default function App() {
         return r.json();
       })
       .then(setVisits)
-      .catch(() => setVisits(MOCK_VISITS));
+      .catch(() => {});
   }, []);
 
   const handleBeginVisit = useCallback(
