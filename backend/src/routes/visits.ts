@@ -9,6 +9,10 @@ import {
   getMedications,
   getNarrative,
   getConversationHistory,
+  saveVitals,
+  saveIntervention,
+  saveMedication,
+  upsertNarrative,
 } from '../db/queries';
 
 const HARDCODED_NURSE_ID = '00000000-0000-0000-0000-000000000001';
@@ -61,6 +65,53 @@ router.get('/:visitId/history', async (req, res) => {
   } catch (err) {
     console.error('[visits/history] Error:', err);
     res.status(500).json({ error: 'Failed to fetch history' });
+  }
+});
+
+// ─── Direct save endpoints (from quick action forms) ─────────
+
+router.post('/:visitId/vitals', async (req, res) => {
+  try {
+    const row = await saveVitals(req.params.visitId, req.body);
+    res.json(row);
+  } catch (err) {
+    console.error('[visits/vitals] Error:', err);
+    res.status(500).json({ error: 'Failed to save vitals' });
+  }
+});
+
+router.post('/:visitId/interventions', async (req, res) => {
+  try {
+    const row = await saveIntervention(req.params.visitId, req.body);
+    res.json(row);
+  } catch (err) {
+    console.error('[visits/interventions] Error:', err);
+    res.status(500).json({ error: 'Failed to save intervention' });
+  }
+});
+
+router.post('/:visitId/medications', async (req, res) => {
+  try {
+    const row = await saveMedication(req.params.visitId, req.body);
+    res.json(row);
+  } catch (err) {
+    console.error('[visits/medications] Error:', err);
+    res.status(500).json({ error: 'Failed to save medication' });
+  }
+});
+
+router.post('/:visitId/narrative', async (req, res) => {
+  try {
+    const row = await upsertNarrative(
+      req.params.visitId,
+      req.body.content,
+      req.body.patient_tolerated_ok,
+      req.body.patient_tolerated_notes,
+    );
+    res.json(row);
+  } catch (err) {
+    console.error('[visits/narrative] Error:', err);
+    res.status(500).json({ error: 'Failed to save narrative' });
   }
 });
 

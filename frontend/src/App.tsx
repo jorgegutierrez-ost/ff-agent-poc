@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback } from 'react';
-import NavSidebar from './components/NavSidebar';
 import PatientListPage from './components/PatientListPage';
 import VisitPage from './components/VisitPage';
 import { useChat } from './hooks/useChat';
@@ -67,8 +66,6 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-white font-sans text-gray-900 antialiased">
-      <NavSidebar activePage={page} />
-
       {page === 'patients' && (
         <PatientListPage
           patients={patients}

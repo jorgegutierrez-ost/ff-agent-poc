@@ -27,18 +27,36 @@ function getInitials(name: string): string {
     .slice(0, 2);
 }
 
-// Fuzzy match: check if the tool input name is close enough to a schedule item label
+// Extract just the drug/procedure name, stripping doses like "25mg", "2.5ml", "100mcg"
+function extractName(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/\d+(\.\d+)?\s*(mg|mcg|ml|g|units?|iu|meq|%)/gi, '') // strip doses
+    .replace(/[^a-z]/g, '') // letters only
+    .trim();
+}
+
+// Fuzzy match: compare drug/procedure names ignoring doses and formatting
 function fuzzyMatch(scheduleLabel: string, toolName: string): boolean {
+  // Full normalized comparison
   const a = scheduleLabel.toLowerCase().replace(/[^a-z0-9]/g, '');
   const b = toolName.toLowerCase().replace(/[^a-z0-9]/g, '');
-  // Exact match after normalization
   if (a === b) return true;
-  // One contains the other
   if (a.includes(b) || b.includes(a)) return true;
-  // Match on first word (e.g. "Metoprolol" matches "Metoprolol 25mg")
-  const aFirst = scheduleLabel.toLowerCase().split(/\s+/)[0];
-  const bFirst = toolName.toLowerCase().split(/\s+/)[0];
-  if (aFirst.length > 3 && bFirst.length > 3 && (aFirst.includes(bFirst) || bFirst.includes(aFirst))) return true;
+
+  // Name-only comparison (strip doses)
+  const aName = extractName(scheduleLabel);
+  const bName = extractName(toolName);
+  if (aName.length > 3 && bName.length > 3) {
+    if (aName === bName) return true;
+    if (aName.includes(bName) || bName.includes(aName)) return true;
+  }
+
+  // First word comparison (e.g. "ranitidine" matches regardless of dose)
+  const aFirst = scheduleLabel.toLowerCase().split(/\s+/)[0].replace(/[^a-z]/g, '');
+  const bFirst = toolName.toLowerCase().split(/\s+/)[0].replace(/[^a-z]/g, '');
+  if (aFirst.length > 3 && bFirst.length > 3 && (aFirst === bFirst || aFirst.includes(bFirst) || bFirst.includes(aFirst))) return true;
+
   return false;
 }
 
@@ -144,7 +162,7 @@ export default function VisitPage({
     [],
   );
 
-  // Form submitted → mark item, build chat message, send to agent
+  // Form submitted → save to DB directly, mark item, send chat message
   const handleFormSubmit = useCallback(
     (item: ScheduleItem, data: Record<string, string>) => {
       const action = data.action ?? '';
@@ -167,6 +185,9 @@ export default function VisitPage({
         completedAction = 'done';
       }
 
+      // Save directly to DB (don't rely on agent calling the tool)
+      saveFormToDb(item, data, visit.id);
+
       setScheduleItems((prev) =>
         prev.map((si) =>
           si.id === item.id
@@ -188,7 +209,7 @@ export default function VisitPage({
       onSendMessage(chatMsg);
       setActiveForm(null);
     },
-    [onSendMessage],
+    [onSendMessage, visit.id],
   );
 
   const handleFormCancel = useCallback(() => {
@@ -271,6 +292,77 @@ export default function VisitPage({
       </div>
     </div>
   );
+}
+
+// Save form data directly to the backend DB
+function saveFormToDb(item: ScheduleItem, data: Record<string, string>, visitId: string): void {
+  const base = `${API_BASE}/api/visits/${visitId}`;
+
+  if (item.type === 'vitals' && data.action !== 'skipped') {
+    const body: Record<string, unknown> = {};
+    if (data.bp_systolic) body.bp_systolic = Number(data.bp_systolic);
+    if (data.bp_diastolic) body.bp_diastolic = Number(data.bp_diastolic);
+    if (data.heart_rate) body.heart_rate = Number(data.heart_rate);
+    if (data.respiratory_rate) body.respiratory_rate = Number(data.respiratory_rate);
+    if (data.temperature_f) body.temperature_f = Number(data.temperature_f);
+    if (data.o2_saturation) body.o2_saturation = Number(data.o2_saturation);
+    if (data.weight_lbs) body.weight_lbs = Number(data.weight_lbs);
+    if (data.pain_score) body.pain_score = Number(data.pain_score);
+    if (data.notes) body.notes = data.notes;
+    fetch(`${base}/vitals`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).catch((e) => console.error('[save vitals]', e));
+  }
+
+  if (item.type === 'medication') {
+    const action = data.action ?? '';
+    const given = action !== 'med_skipped';
+    const body: Record<string, unknown> = {
+      name: item.label,
+      given,
+    };
+    if (data.dose) body.dose = data.dose;
+    if (data.route) body.route = data.route;
+    if (data.reason) body.reason_withheld = data.reason;
+    if (data.notes) body.dose = (body.dose ?? '') + (data.notes ? ` (${data.notes})` : '');
+    fetch(`${base}/medications`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).catch((e) => console.error('[save medication]', e));
+  }
+
+  if (item.type === 'intervention') {
+    const action = data.action ?? '';
+    if (action !== 'intervention_skip') {
+      const body: Record<string, unknown> = {
+        name: item.label,
+      };
+      if (data.outcome) body.outcome = data.outcome;
+      if (data.notes) body.description = data.notes;
+      if (data.reason) body.description = data.reason;
+      fetch(`${base}/interventions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }).catch((e) => console.error('[save intervention]', e));
+    }
+  }
+
+  if (item.type === 'narrative') {
+    if (data.content) {
+      fetch(`${base}/narrative`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content: data.content,
+          patient_tolerated_ok: data.patient_tolerated === 'yes' ? true : data.patient_tolerated === 'no' ? false : undefined,
+        }),
+      }).catch((e) => console.error('[save narrative]', e));
+    }
+  }
 }
 
 // Build a natural-language summary of the form data to send as a chat message
