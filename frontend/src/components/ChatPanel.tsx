@@ -16,6 +16,7 @@ interface ChatPanelProps {
   isStreaming: boolean;
   activeToolCall: string | null;
   activeForm: ActiveForm | null;
+  lastLoadedMsgId: string | null;
   onSendMessage: (content: string) => void;
   onFormSubmit: (item: ScheduleItem, data: Record<string, string>) => void;
   onFormCancel: () => void;
@@ -39,6 +40,7 @@ export default function ChatPanel({
   isStreaming,
   activeToolCall,
   activeForm,
+  lastLoadedMsgId,
   onSendMessage,
   onFormSubmit,
   onFormCancel,
@@ -51,7 +53,14 @@ export default function ChatPanel({
   const tts = useAudioPlayer();
 
   const [autoSpeak, setAutoSpeak] = useState(true);
-  const lastSpokenIdRef = useRef<string | null>(null);
+  const lastSpokenIdRef = useRef<string | null>(lastLoadedMsgId);
+
+  // Seed TTS ref with last loaded message so history doesn't get spoken
+  useEffect(() => {
+    if (lastLoadedMsgId) {
+      lastSpokenIdRef.current = lastLoadedMsgId;
+    }
+  }, [lastLoadedMsgId]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -239,16 +248,16 @@ export default function ChatPanel({
         </div>
       </div>
 
-      {/* ── Input area ── */}
-      <div className="border-t border-gray-200 px-6 py-5">
+      {/* ── Input area — voice-first, tablet-optimized ── */}
+      <div className="border-t border-gray-200 bg-gray-50 px-6 py-6">
         {/* TTS playing bar */}
         {tts.isPlaying && (
-          <div className="mb-3 flex items-center justify-center gap-2">
-            <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-500" />
-            <span className="text-xs text-indigo-500">Speaking...</span>
+          <div className="mb-4 flex items-center justify-center gap-2">
+            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-indigo-500" />
+            <span className="text-sm text-indigo-500">Speaking...</span>
             <button
               onClick={tts.stop}
-              className="text-xs text-gray-400 hover:text-gray-600"
+              className="ml-1 rounded-lg border border-indigo-200 px-2.5 py-1 text-xs text-indigo-600 hover:bg-indigo-50"
             >
               Stop
             </button>
@@ -257,58 +266,64 @@ export default function ChatPanel({
 
         {recorder.isTranscribing ? (
           /* ── Transcribing ── */
-          <div className="flex flex-col items-center gap-3 py-4">
-            <div className="flex h-20 w-20 items-center justify-center rounded-full bg-gray-100">
-              <div className="h-6 w-6 animate-spin rounded-full border-[3px] border-gray-300 border-t-gray-700" />
+          <div className="flex flex-col items-center gap-4 py-6">
+            <div className="flex h-24 w-24 items-center justify-center rounded-full bg-white shadow-md">
+              <div className="h-8 w-8 animate-spin rounded-full border-[3px] border-gray-200 border-t-gray-700" />
             </div>
-            <span className="text-sm text-gray-500">Transcribing...</span>
+            <span className="text-sm font-medium text-gray-600">Processing your voice...</span>
           </div>
         ) : recorder.isRecording ? (
-          /* ── Listening mode — big Siri/Alexa style ── */
-          <div className="flex flex-col items-center gap-4 py-2">
-            {/* Animated orb */}
+          /* ── Listening mode ── */
+          <div className="flex flex-col items-center gap-5 py-4">
             <button
               onClick={handleMicToggle}
-              className="group relative flex h-24 w-24 items-center justify-center"
+              className="group relative flex h-28 w-28 items-center justify-center"
             >
-              {/* Outer pulse rings */}
-              <span className="absolute inset-0 animate-ping rounded-full bg-red-400/20" />
-              <span className="absolute inset-2 animate-pulse rounded-full bg-red-400/15" />
-              {/* Core circle */}
-              <span className="relative flex h-20 w-20 items-center justify-center rounded-full bg-red-500 shadow-xl shadow-red-200 transition-transform group-hover:scale-105">
-                <svg className="h-8 w-8 text-white" fill="currentColor" viewBox="0 0 24 24">
+              {/* Animated rings */}
+              <span className="absolute inset-[-12px] animate-ping rounded-full bg-red-400/10" />
+              <span className="absolute inset-0 animate-pulse rounded-full bg-red-400/15" />
+              <span className="absolute inset-3 animate-pulse rounded-full bg-red-400/10" style={{ animationDelay: '0.5s' }} />
+              {/* Core */}
+              <span className="relative flex h-24 w-24 items-center justify-center rounded-full bg-red-500 shadow-2xl shadow-red-300 transition-transform group-hover:scale-105 group-active:scale-95">
+                <svg className="h-10 w-10 text-white" fill="currentColor" viewBox="0 0 24 24">
                   <rect x="6" y="6" width="12" height="12" rx="2" />
                 </svg>
               </span>
             </button>
 
             <div className="flex flex-col items-center gap-1">
-              <span className="text-sm font-medium text-gray-900">Listening...</span>
-              <span className="text-xs tabular-nums text-gray-400">
+              <span className="text-base font-semibold text-gray-900">Listening...</span>
+              <span className="text-sm tabular-nums text-gray-400">
                 {formatDuration(recorder.durationMs)}
               </span>
+              <span className="mt-1 text-xs text-gray-400">Tap to stop and send</span>
             </div>
           </div>
         ) : (
-          /* ── Normal input with big mic ── */
-          <div className="flex flex-col items-center gap-4">
-            {/* Big mic orb */}
+          /* ── Default: voice-first with keyboard fallback ── */
+          <div className="flex flex-col items-center gap-5">
+            {/* Main speak button — hero element */}
             <button
               onClick={handleMicToggle}
               disabled={!recorder.isSupported}
-              className="group relative flex h-20 w-20 items-center justify-center rounded-full bg-gray-900 shadow-lg transition-all hover:scale-105 hover:bg-gray-800 hover:shadow-xl active:scale-95 disabled:cursor-not-allowed disabled:bg-gray-200 disabled:shadow-none"
-              title={recorder.isSupported ? 'Tap to start listening' : 'Microphone not available'}
+              className="group relative flex h-28 w-28 items-center justify-center rounded-full bg-orange-600 shadow-xl shadow-orange-200 transition-all hover:scale-105 hover:bg-orange-500 hover:shadow-2xl active:scale-95 disabled:cursor-not-allowed disabled:bg-gray-200 disabled:shadow-none disabled:shadow-none"
+              title={recorder.isSupported ? 'Tap to speak' : 'Microphone not available'}
             >
-              <svg className="h-8 w-8 text-white group-disabled:text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              {/* Subtle idle glow */}
+              <span className="absolute inset-[-4px] rounded-full bg-orange-500/10 group-hover:bg-orange-500/20 transition-colors" />
+              <svg className="relative h-10 w-10 text-white group-disabled:text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z" />
               </svg>
             </button>
 
-            <p className="text-xs text-gray-400">
-              {recorder.isSupported ? 'Tap to start listening' : 'Microphone not available'}
-            </p>
+            <div className="flex flex-col items-center gap-0.5">
+              <span className="text-base font-semibold text-gray-900">
+                {recorder.isSupported ? 'Tap to speak' : 'Microphone not available'}
+              </span>
+              <span className="text-xs text-gray-400">or type below</span>
+            </div>
 
-            {/* Text input below */}
+            {/* Keyboard input — secondary, compact */}
             <div className="flex w-full items-end gap-2">
               <div className="flex-1">
                 <textarea
@@ -316,9 +331,9 @@ export default function ChatPanel({
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={handleKeyDown}
-                  placeholder="Or type a message..."
+                  placeholder="Type a message..."
                   rows={1}
-                  className="w-full resize-none rounded-xl border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-400 outline-none transition-colors focus:border-gray-300 focus:bg-white"
+                  className="w-full resize-none rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm text-gray-900 placeholder-gray-400 outline-none transition-colors focus:border-gray-400 focus:ring-1 focus:ring-gray-200"
                 />
               </div>
               {input.trim() && (

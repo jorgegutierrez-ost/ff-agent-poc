@@ -22,9 +22,16 @@ export function useChat() {
     narrative: null,
   });
 
+  const [lastLoadedMsgId, setLastLoadedMsgId] = useState<string | null>(null);
+
   const wsRef = useRef<WebSocket | null>(null);
   const streamBufferRef = useRef('');
   const activeVisitIdRef = useRef<string | null>(null);
+  const toolCallListenerRef = useRef<((tool: string, input: Record<string, unknown>) => void) | null>(null);
+
+  const onToolCall = useCallback((listener: (tool: string, input: Record<string, unknown>) => void) => {
+    toolCallListenerRef.current = listener;
+  }, []);
 
   const resetChat = useCallback(() => {
     setMessages([]);
@@ -55,14 +62,18 @@ export function useChat() {
 
         if (filtered.length > 0) {
           hasHistory = true;
-          setMessages(
-            filtered.map((m) => ({
-              id: m.id,
-              role: m.role,
-              content: m.content,
-              timestamp: new Date(m.timestamp),
-            })),
-          );
+          const mapped = filtered.map((m) => ({
+            id: m.id,
+            role: m.role,
+            content: m.content,
+            timestamp: new Date(m.timestamp),
+          }));
+          setMessages(mapped);
+          // Mark last message as already seen so TTS doesn't replay it
+          const lastAgent = [...mapped].reverse().find((m) => m.role === 'agent');
+          if (lastAgent) {
+            setLastLoadedMsgId(lastAgent.id);
+          }
         }
       }
 
@@ -162,6 +173,7 @@ export function useChat() {
       case 'tool_call':
         setActiveToolCall(formatToolName(msg.tool));
         applyToolCall(msg.tool, msg.input);
+        toolCallListenerRef.current?.(msg.tool, msg.input);
         break;
 
       case 'tool_result':
@@ -322,9 +334,11 @@ export function useChat() {
     activeToolCall,
     summary,
     progress,
+    lastLoadedMsgId,
     connectAndStartVisit,
     sendMessage,
     resetChat,
+    onToolCall,
   };
 }
 

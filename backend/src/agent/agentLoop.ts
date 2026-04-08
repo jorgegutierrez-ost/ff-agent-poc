@@ -16,17 +16,33 @@ type AnthropicMessage = {
 
 /**
  * Convert our DB conversation rows into the Anthropic messages format.
+ *
+ * Key constraints:
+ * - Messages must alternate user/assistant
+ * - tool_result blocks must immediately follow the assistant message containing
+ *   the matching tool_use block
+ * - Multiple tool_results should be grouped into one user message
  */
 function toAnthropicMessages(history: ConversationMessage[]): AnthropicMessage[] {
   const messages: AnthropicMessage[] = [];
 
+  // Collect tool_use IDs from the current assistant message so we can
+  // validate tool_results reference them
+  let pendingToolUseIds = new Set<string>();
+
   for (const msg of history) {
     if (msg.role === 'user') {
-      messages.push({ role: 'user', content: msg.content ?? '' });
+      // If the last message is also a user, merge (Anthropic doesn't allow consecutive same-role)
+      const last = messages[messages.length - 1];
+      if (last && last.role === 'user' && typeof last.content === 'string') {
+        last.content += '\n' + (msg.content ?? '');
+      } else {
+        messages.push({ role: 'user', content: msg.content ?? '' });
+      }
+      pendingToolUseIds.clear();
     } else if (msg.role === 'assistant') {
-      // Could be plain text or a tool_use block
       if (msg.tool_name && msg.tool_input) {
-        // This was a tool_use turn — check if the last message is already an assistant
+        // This is a tool_use block — merge into the current assistant message
         const last = messages[messages.length - 1];
         const block = {
           type: 'tool_use',
@@ -34,38 +50,131 @@ function toAnthropicMessages(history: ConversationMessage[]): AnthropicMessage[]
           name: msg.tool_name,
           input: msg.tool_input,
         };
+        pendingToolUseIds.add(msg.id);
+
         if (last && last.role === 'assistant' && Array.isArray(last.content)) {
           last.content.push(block);
         } else if (last && last.role === 'assistant' && typeof last.content === 'string') {
-          // Convert string content to blocks array
-          const textBlock = { type: 'text', text: last.content };
-          last.content = [textBlock, block];
+          last.content = [{ type: 'text', text: last.content }, block];
         } else {
           messages.push({ role: 'assistant', content: [block] });
         }
       } else {
-        messages.push({ role: 'assistant', content: msg.content ?? '' });
+        // Plain text assistant message
+        const last = messages[messages.length - 1];
+        // If the previous assistant message had tool_use blocks and we also have text,
+        // prepend the text as a text block
+        if (last && last.role === 'assistant' && Array.isArray(last.content) && msg.content) {
+          // This text came before or after tool_use in the same turn — add as text block
+          last.content.unshift({ type: 'text', text: msg.content });
+        } else {
+          messages.push({ role: 'assistant', content: msg.content ?? '' });
+        }
+        pendingToolUseIds.clear();
       }
     } else if (msg.role === 'tool_result') {
-      messages.push({
-        role: 'user',
-        content: [
-          {
-            type: 'tool_result',
-            tool_use_id: msg.tool_name ?? msg.id, // tool_name stores the tool_use_id for results
-            content: JSON.stringify(msg.tool_result ?? { success: true }),
-          },
-        ],
-      });
+      const toolUseId = msg.tool_name ?? msg.id;
+      const resultBlock = {
+        type: 'tool_result',
+        tool_use_id: toolUseId,
+        content: JSON.stringify(msg.tool_result ?? { success: true }),
+      };
+
+      // Group tool_results into one user message
+      const last = messages[messages.length - 1];
+      if (last && last.role === 'user' && Array.isArray(last.content) &&
+          last.content.length > 0 && (last.content[0] as { type: string }).type === 'tool_result') {
+        (last.content as Array<{ type: string; [key: string]: unknown }>).push(resultBlock);
+      } else {
+        messages.push({ role: 'user', content: [resultBlock] });
+      }
+    }
+  }
+
+  // Validation: strip any assistant message with tool_use blocks that don't have
+  // matching tool_results immediately after, and any tool_results without preceding tool_use.
+  // This handles corrupted history from crashed sessions.
+  const validated: AnthropicMessage[] = [];
+
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+
+    // Check if this assistant message contains tool_use blocks
+    if (m.role === 'assistant' && Array.isArray(m.content)) {
+      const toolUseIds = (m.content as Array<{ type: string; id?: string }>)
+        .filter((b) => b.type === 'tool_use' && b.id)
+        .map((b) => b.id!);
+
+      if (toolUseIds.length > 0) {
+        // Look ahead: the next message must be a user message with matching tool_results
+        const next = messages[i + 1];
+        if (next && next.role === 'user' && Array.isArray(next.content)) {
+          const resultIds = new Set(
+            (next.content as Array<{ type: string; tool_use_id?: string }>)
+              .filter((b) => b.type === 'tool_result')
+              .map((b) => b.tool_use_id ?? ''),
+          );
+          const allMatched = toolUseIds.every((id) => resultIds.has(id));
+          if (allMatched) {
+            // Valid pair — keep both
+            validated.push(m);
+            validated.push(next);
+            i++; // skip the next message since we already added it
+            continue;
+          }
+        }
+        // Missing or mismatched tool_results — strip the tool_use blocks,
+        // keep only text content if any
+        const textBlocks = (m.content as Array<{ type: string; text?: string }>)
+          .filter((b) => b.type === 'text' && b.text);
+        if (textBlocks.length > 0) {
+          validated.push({
+            role: 'assistant',
+            content: textBlocks.length === 1 ? (textBlocks[0].text ?? '') : textBlocks,
+          });
+        }
+        // Skip this message's tool_use and any orphaned tool_result that follows
+        if (messages[i + 1]?.role === 'user' && Array.isArray(messages[i + 1]?.content)) {
+          i++; // skip orphaned tool_result
+        }
+        continue;
+      }
+    }
+
+    // Skip standalone tool_result messages that weren't consumed above
+    if (m.role === 'user' && Array.isArray(m.content) &&
+        (m.content as Array<{ type: string }>).some((b) => b.type === 'tool_result')) {
+      const prev = validated[validated.length - 1];
+      // Only valid if preceding message is assistant with tool_use (already handled above)
+      if (!prev || prev.role !== 'assistant' || !Array.isArray(prev.content)) {
+        continue; // orphaned — skip
+      }
+    }
+
+    validated.push(m);
+  }
+
+  // Ensure alternating roles — merge consecutive same-role messages
+  const final: AnthropicMessage[] = [];
+  for (const m of validated) {
+    const last = final[final.length - 1];
+    if (last && last.role === m.role) {
+      // Merge: both are strings
+      if (typeof last.content === 'string' && typeof m.content === 'string') {
+        last.content += '\n' + m.content;
+      }
+      // Otherwise skip the duplicate
+    } else {
+      final.push(m);
     }
   }
 
   // API requires the conversation to end with a user message
-  if (messages.length > 0 && messages[messages.length - 1].role === 'assistant') {
-    messages.push({ role: 'user', content: 'Please continue.' });
+  if (final.length > 0 && final[final.length - 1].role === 'assistant') {
+    final.push({ role: 'user', content: 'Please continue.' });
   }
 
-  return messages;
+  return final;
 }
 
 function sendWs(ws: WebSocket, data: Record<string, unknown>): void {

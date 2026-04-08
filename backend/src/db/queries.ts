@@ -152,6 +152,14 @@ export async function getVitals(visitId: string): Promise<VitalSigns | null> {
   return rows[0] ?? null;
 }
 
+export async function getAllVitals(visitId: string): Promise<VitalSigns[]> {
+  const { rows } = await pool.query(
+    `SELECT * FROM vital_signs WHERE visit_id = $1 ORDER BY recorded_at ASC`,
+    [visitId],
+  );
+  return rows;
+}
+
 // ─── Interventions ───────────────────────────────────────────
 
 export async function saveIntervention(

@@ -1,6 +1,22 @@
 import { useState, useMemo } from 'react';
 import type { ScheduleItem } from '../types';
 
+const ANIMATIONS_CSS = `
+@keyframes popIn {
+  0% { transform: scale(0); opacity: 0; }
+  50% { transform: scale(1.3); }
+  100% { transform: scale(1); opacity: 1; }
+}
+@keyframes fadeSlideIn {
+  0% { opacity: 0; transform: translateY(-4px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+@keyframes completeCard {
+  0% { background-color: rgb(209 250 229); border-color: rgb(110 231 183); }
+  100% { background-color: rgb(236 253 245 / 0.5); border-color: rgb(209 250 229); }
+}
+`;
+
 interface VisitScheduleProps {
   items: ScheduleItem[];
   onQuickAction: (item: ScheduleItem, actionValue: string) => void;
@@ -59,11 +75,13 @@ interface ScheduleCardProps {
 }
 
 function ScheduleCard({ item, isOverdue, onQuickAction }: ScheduleCardProps) {
+  const isDone = item.status === 'completed' || item.status === 'skipped';
+
   return (
     <div
-      className={`rounded-xl border px-4 py-3 transition-colors ${
-        item.status === 'completed' || item.status === 'skipped'
-          ? 'border-gray-100 bg-gray-50 opacity-60'
+      className={`rounded-xl border px-4 py-3 transition-all duration-500 ${
+        isDone
+          ? 'border-emerald-100 bg-emerald-50/50 animate-[completeCard_0.5s_ease-out]'
           : isOverdue
             ? 'border-red-200 bg-white'
             : 'border-gray-200 bg-white'
@@ -71,32 +89,37 @@ function ScheduleCard({ item, isOverdue, onQuickAction }: ScheduleCardProps) {
     >
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-start gap-3 min-w-0 flex-1">
-          <div
-            className={`mt-0.5 shrink-0 ${
-              isOverdue
-                ? 'text-red-400'
-                : item.status === 'completed'
-                  ? 'text-emerald-400'
-                  : 'text-gray-400'
-            }`}
-          >
-            <TypeIcon type={item.type} />
+          {/* Animated check / type icon */}
+          <div className="mt-0.5 shrink-0">
+            {isDone ? (
+              <div className="flex h-5 w-5 animate-[popIn_0.3s_ease-out] items-center justify-center rounded-full bg-emerald-500">
+                <svg className="h-3 w-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                </svg>
+              </div>
+            ) : (
+              <div className={isOverdue ? 'text-red-400' : 'text-gray-400'}>
+                <TypeIcon type={item.type} />
+              </div>
+            )}
           </div>
           <div className="min-w-0">
             <p
-              className={`text-sm font-medium ${
-                item.status === 'completed' || item.status === 'skipped'
+              className={`text-sm font-medium transition-all duration-300 ${
+                isDone
                   ? 'text-gray-400 line-through'
                   : 'text-gray-900'
               }`}
             >
               {item.label}
             </p>
-            <p className="mt-0.5 text-xs text-gray-400">{item.sublabel}</p>
+            <p className={`mt-0.5 text-xs transition-colors duration-300 ${isDone ? 'text-gray-300' : 'text-gray-400'}`}>
+              {item.sublabel}
+            </p>
           </div>
         </div>
         <div className="shrink-0 text-right">
-          <span className="text-sm tabular-nums text-gray-500">
+          <span className={`text-sm tabular-nums transition-colors duration-300 ${isDone ? 'text-gray-300' : 'text-gray-500'}`}>
             {formatTime(item.scheduledTime)}
           </span>
           {isOverdue && item.lateMinutes && (
@@ -105,18 +128,18 @@ function ScheduleCard({ item, isOverdue, onQuickAction }: ScheduleCardProps) {
             </p>
           )}
           {item.status === 'completed' && item.completedAction && (
-            <p className="mt-0.5 text-xs text-emerald-500 capitalize">
+            <p className="mt-0.5 animate-[fadeSlideIn_0.4s_ease-out] text-xs font-medium text-emerald-500 capitalize">
               {item.completedAction}
             </p>
           )}
           {item.status === 'skipped' && (
-            <p className="mt-0.5 text-xs text-gray-400">Skipped</p>
+            <p className="mt-0.5 animate-[fadeSlideIn_0.4s_ease-out] text-xs text-amber-500">Skipped</p>
           )}
         </div>
       </div>
 
       {/* Quick actions — only show for pending/overdue items */}
-      {(item.status === 'pending' || item.status === 'overdue') && item.quickActions.length > 0 && (
+      {!isDone && item.quickActions.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-2">
           {item.quickActions.map((action) => (
             <button
@@ -182,6 +205,7 @@ export default function VisitSchedule({ items, onQuickAction }: VisitSchedulePro
 
   return (
     <div className="flex h-full flex-1 flex-col overflow-hidden">
+      <style dangerouslySetInnerHTML={{ __html: ANIMATIONS_CSS }} />
       <div className="flex-1 overflow-y-auto px-6 pb-4 pt-2">
         {/* Overdue section */}
         {overdue.length > 0 && (

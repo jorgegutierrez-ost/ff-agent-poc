@@ -19,8 +19,10 @@ export default function App() {
     messages,
     isStreaming,
     activeToolCall,
+    lastLoadedMsgId,
     connectAndStartVisit,
     sendMessage,
+    onToolCall,
   } = useChat();
 
   // Try to fetch from backend, fall back to mock data
@@ -82,7 +84,9 @@ export default function App() {
           messages={messages}
           isStreaming={isStreaming}
           activeToolCall={activeToolCall}
+          lastLoadedMsgId={lastLoadedMsgId}
           onSendMessage={sendMessage}
+          onToolCall={onToolCall}
           onGoBack={handleGoBack}
         />
       )}
