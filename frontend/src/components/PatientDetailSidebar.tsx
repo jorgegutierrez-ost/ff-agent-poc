@@ -33,13 +33,19 @@ function getFirstName(name: string): string {
   return name.split(' ')[0];
 }
 
+function parseDate(dateStr: string): Date {
+  // Handle both "2026-04-01" and "2026-04-01T00:00:00.000Z"
+  const s = dateStr.includes('T') ? dateStr : dateStr + 'T00:00:00';
+  return new Date(s);
+}
+
 function formatShortDate(dateStr: string): string {
-  const d = new Date(dateStr + 'T00:00:00');
+  const d = parseDate(dateStr);
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
 function isOlderThan7Days(dateStr: string): boolean {
-  const d = new Date(dateStr + 'T00:00:00');
+  const d = parseDate(dateStr);
   const now = new Date();
   const diffMs = now.getTime() - d.getTime();
   return diffMs > 7 * 24 * 60 * 60 * 1000;
