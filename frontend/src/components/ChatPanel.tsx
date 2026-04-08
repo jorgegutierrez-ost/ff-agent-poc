@@ -185,6 +185,21 @@ export default function ChatPanel({
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-5 py-4">
         <div className="space-y-4">
+          {/* Empty state — nudge the nurse to start talking */}
+          {messages.length === 0 && !isStreaming && !activeToolCall && (
+            <div className="flex flex-col items-center justify-center py-16">
+              <img
+                src="/aria-avatar.png"
+                alt="Aria"
+                className="mb-4 h-20 w-20 rounded-full object-cover shadow-md"
+              />
+              <p className="text-lg font-semibold text-gray-900">Talk to Aria</p>
+              <p className="mt-1 text-sm text-gray-400">
+                Tap the mic or type below to start documenting
+              </p>
+            </div>
+          )}
+
           {messages.map((msg, i) => {
             const prevMsg = messages[i - 1];
             const showTime =
@@ -325,9 +340,9 @@ export default function ChatPanel({
 
             <div className="flex flex-col items-center gap-0.5">
               <span className="text-base font-semibold text-gray-900">
-                {recorder.isSupported ? 'Tap to speak' : 'Microphone not available'}
+                {recorder.isSupported ? 'Talk to Aria' : 'Microphone not available'}
               </span>
-              <span className="text-xs text-gray-400">or type below</span>
+              <span className="text-xs text-gray-400">Tap the mic or type below</span>
             </div>
 
             {/* Keyboard input — secondary, compact */}
