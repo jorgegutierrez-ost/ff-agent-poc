@@ -51,7 +51,7 @@ app.use('/api/audio', audioRouter);
 // HTTP + WebSocket server
 const server = http.createServer(app);
 
-const wss = new WebSocketServer({ server, path: '/ws' });
+const wss = new WebSocketServer({ server });
 wss.on('connection', handleWebSocket);
 
 // Start
@@ -71,9 +71,9 @@ async function start(): Promise<void> {
     console.error('[db] Seed failed:', err);
   }
 
-  server.listen(PORT, () => {
-    console.log(`[server] Listening on http://localhost:${PORT}`);
-    console.log(`[ws]     WebSocket on ws://localhost:${PORT}/ws`);
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`[server] Listening on http://0.0.0.0:${PORT}`);
+    console.log(`[ws]     WebSocket on ws://0.0.0.0:${PORT}/ws`);
   });
 }
 
