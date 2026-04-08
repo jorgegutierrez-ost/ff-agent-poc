@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback } from 'react';
+import { API_BASE } from '../config';
 
 export interface AudioRecorderState {
   isRecording: boolean;
@@ -134,7 +135,7 @@ async function transcribeAudio(blob: Blob): Promise<string> {
   const ext = blob.type.includes('webm') ? 'webm' : blob.type.includes('mp4') ? 'mp4' : 'wav';
   formData.append('audio', blob, `recording.${ext}`);
 
-  const res = await fetch('/api/audio/transcribe', {
+  const res = await fetch(`${API_BASE}/api/audio/transcribe`, {
     method: 'POST',
     body: formData,
   });

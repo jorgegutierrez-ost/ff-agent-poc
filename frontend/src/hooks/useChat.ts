@@ -9,7 +9,7 @@ import type {
   ServerMessage,
 } from '../types';
 
-const WS_URL = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`;
+import { API_BASE, WS_URL } from '../config';
 
 export function useChat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -38,8 +38,8 @@ export function useChat() {
   const loadHistory = useCallback(async (visitId: string): Promise<boolean> => {
     try {
       const [historyRes, summaryRes] = await Promise.all([
-        fetch(`/api/visits/${visitId}/history`),
-        fetch(`/api/visits/${visitId}/summary`),
+        fetch(`${API_BASE}/api/visits/${visitId}/history`),
+        fetch(`${API_BASE}/api/visits/${visitId}/summary`),
       ]);
 
       let hasHistory = false;

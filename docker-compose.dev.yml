@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  db:
+    ports:
+      - "5432:5432"
+
+  backend:
+    build:
+      context: ./backend
+    command: npx ts-node-dev --respawn src/index.ts
+    volumes:
+      - ./backend/src:/app/src
+    environment:
+      DATABASE_URL: postgresql://nurse_app:nurse_app_dev@db:5432/nurse_logging
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      PORT: "3030"
+      NODE_ENV: development
+
+  frontend:
+    command: npx vite --host 0.0.0.0 --port 3000
+    volumes:
+      - ./frontend/src:/app/src
+    environment:
+      VITE_WS_URL: ws://localhost:4000/ws
+      VITE_API_URL: http://localhost:4000

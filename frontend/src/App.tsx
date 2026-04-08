@@ -4,6 +4,7 @@ import PatientListPage from './components/PatientListPage';
 import VisitPage from './components/VisitPage';
 import { useChat } from './hooks/useChat';
 import { MOCK_PATIENTS, MOCK_VISITS } from './mockData';
+import { API_BASE } from './config';
 import type { Patient, Visit } from './types';
 
 type Page = 'patients' | 'visit';
@@ -24,7 +25,7 @@ export default function App() {
 
   // Try to fetch from backend, fall back to mock data
   useEffect(() => {
-    fetch('/api/patients')
+    fetch(`${API_BASE}/api/patients`)
       .then((r) => {
         if (!r.ok) throw new Error();
         return r.json();
@@ -32,7 +33,7 @@ export default function App() {
       .then(setPatients)
       .catch(() => setPatients(MOCK_PATIENTS));
 
-    fetch('/api/visits')
+    fetch(`${API_BASE}/api/visits`)
       .then((r) => {
         if (!r.ok) throw new Error();
         return r.json();

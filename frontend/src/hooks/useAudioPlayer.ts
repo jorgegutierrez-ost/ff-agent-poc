@@ -1,4 +1,5 @@
 import { useRef, useState, useCallback } from 'react';
+import { API_BASE } from '../config';
 
 export function useAudioPlayer() {
   const [isPlaying, setIsPlaying] = useState(false);
@@ -15,7 +16,7 @@ export function useAudioPlayer() {
     abortRef.current = controller;
 
     try {
-      const res = await fetch('/api/audio/tts', {
+      const res = await fetch(`${API_BASE}/api/audio/tts`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
