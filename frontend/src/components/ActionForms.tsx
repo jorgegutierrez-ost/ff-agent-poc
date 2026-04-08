@@ -57,7 +57,7 @@ export function VitalsForm({ item, onSubmit, onCancel }: VitalsFormProps) {
       setShowError(true);
       return;
     }
-    onSubmit(item, data);
+    onSubmit(item, data as unknown as Record<string, string>);
   };
 
   return (

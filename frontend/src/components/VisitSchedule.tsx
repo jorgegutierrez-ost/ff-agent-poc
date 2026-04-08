@@ -172,7 +172,6 @@ export default function VisitSchedule({ items, onQuickAction }: VisitSchedulePro
     return groups;
   }, [upcoming]);
 
-  const totalItems = items.length;
   const pendingCount = overdue.length + upcoming.length;
 
   const groupIcons: Record<string, string> = {

@@ -26,7 +26,7 @@ function getInitials(name: string): string {
 
 export default function VisitPage({
   patient,
-  visit,
+  visit: _visit,
   messages,
   isStreaming,
   activeToolCall,
