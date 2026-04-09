@@ -108,7 +108,7 @@ export async function seed(): Promise<void> {
         id, patient_id, nurse_id, visit_date, planned_start_time,
         planned_end_time, service_type, payer, status
       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-      ON CONFLICT (id) DO NOTHING`,
+      ON CONFLICT (id) DO UPDATE SET visit_date = EXCLUDED.visit_date`,
       [
         v.id, v.patient_id, v.nurse_id, v.visit_date,
         v.planned_start_time, v.planned_end_time,
