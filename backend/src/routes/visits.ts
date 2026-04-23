@@ -33,13 +33,14 @@ router.get('/', async (_req, res) => {
 router.get('/:visitId/summary', async (req, res) => {
   try {
     const { visitId } = req.params;
-    const [vitals, interventions, medications, narrative] = await Promise.all([
+    const [vitals, allVitals, interventions, medications, narrative] = await Promise.all([
       getVitals(visitId),
+      getAllVitals(visitId),
       getInterventions(visitId),
       getMedications(visitId),
       getNarrative(visitId),
     ]);
-    res.json({ vitals, interventions, medications, narrative });
+    res.json({ vitals, all_vitals: allVitals, interventions, medications, narrative });
   } catch (err) {
     console.error('[visits/summary] Error:', err);
     res.status(500).json({ error: 'Failed to fetch visit summary' });

@@ -120,7 +120,7 @@ function ScheduleCard({ item, isOverdue, onQuickAction }: ScheduleCardProps) {
         </div>
         <div className="shrink-0 text-right">
           <span className={`text-sm tabular-nums transition-colors duration-300 ${isDone ? 'text-gray-300' : 'text-gray-500'}`}>
-            {formatTime(item.scheduledTime)}
+            {formatTime(isDone && item.completedAt ? item.completedAt : item.scheduledTime)}
           </span>
           {isOverdue && item.lateMinutes && (
             <p className="mt-0.5 text-xs font-medium text-red-500">

@@ -1,16 +1,96 @@
 import { Patient, Visit } from '../types';
 
+export interface ScheduledTaskForPrompt {
+  type: string; // DB CHECK constrains to medication|intervention|vitals|narrative
+  label: string;
+  sublabel: string | null;
+  scheduled_time: string; // HH:MM:SS or HH:MM
+}
+
+export interface PrnOrderForPrompt {
+  medication: string;
+  dose: string;
+  route: string;
+  indication: string;
+  max_frequency_hours: number | null;
+  notes: string | null;
+}
+
+function renderPrnOrders(orders: PrnOrderForPrompt[]): string {
+  if (orders.length === 0) return 'No PRN orders on file.';
+  return orders
+    .map((o) => {
+      const freq = o.max_frequency_hours != null ? ` · max q${o.max_frequency_hours}h` : '';
+      const notes = o.notes ? `\n      Notes: ${o.notes}` : '';
+      return `  • ${o.medication} ${o.dose} ${o.route}\n      For: ${o.indication}${freq}${notes}`;
+    })
+    .join('\n');
+}
+
+function renderCarePlan(tasks: ScheduledTaskForPrompt[]): string {
+  if (tasks.length === 0) {
+    return 'No scheduled tasks on file for this visit.';
+  }
+
+  const byType = {
+    medication: tasks.filter((t) => t.type === 'medication'),
+    intervention: tasks.filter((t) => t.type === 'intervention'),
+    vitals: tasks.filter((t) => t.type === 'vitals'),
+  };
+
+  const lines: string[] = [];
+
+  if (byType.medication.length > 0) {
+    lines.push('Scheduled medications:');
+    for (const m of byType.medication) {
+      const time = m.scheduled_time.slice(0, 5);
+      const sub = m.sublabel ? ` — ${m.sublabel}` : '';
+      lines.push(`  • ${time} · ${m.label}${sub}`);
+    }
+  }
+
+  if (byType.intervention.length > 0) {
+    if (lines.length > 0) lines.push('');
+    lines.push('Scheduled interventions:');
+    for (const i of byType.intervention) {
+      const time = i.scheduled_time.slice(0, 5);
+      const sub = i.sublabel ? ` — ${i.sublabel}` : '';
+      lines.push(`  • ${time} · ${i.label}${sub}`);
+    }
+  }
+
+  if (byType.vitals.length > 0) {
+    if (lines.length > 0) lines.push('');
+    lines.push('Scheduled vitals checks:');
+    for (const v of byType.vitals) {
+      const time = v.scheduled_time.slice(0, 5);
+      const sub = v.sublabel ? ` — ${v.sublabel}` : '';
+      lines.push(`  • ${time} · ${v.label}${sub}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
 /**
  * Builds the system prompt for the nurse visit agent.
  * This is the single most important file for the quality of the experience.
  */
-export function buildSystemPrompt(patient: Patient, visit: Visit, nurseName: string): string {
+export function buildSystemPrompt(
+  patient: Patient,
+  visit: Visit,
+  nurseName: string,
+  scheduledTasks: ScheduledTaskForPrompt[] = [],
+  prnOrders: PrnOrderForPrompt[] = [],
+): string {
   const patientAge = patient.age_months !== null
     ? `${patient.age_months} months old`
     : `${patient.age_years} years old`;
 
   const allergyList = patient.allergies.join(', ');
   const visitTime = `${visit.planned_start_time} – ${visit.planned_end_time}`;
+  const carePlan = renderCarePlan(scheduledTasks);
+  const prnList = renderPrnOrders(prnOrders);
 
   return `
 You are Aria, a clinical documentation assistant helping ${nurseName}, an RN, log a home health visit.
@@ -31,6 +111,54 @@ Last height:      ${patient.last_height_inches} inches
 Emergency contact:${patient.emergency_contact_name} (${patient.emergency_contact_relation}) — ${patient.emergency_contact_phone}
 Visit:            ${visit.service_type}, ${visitTime}
 Visit ID:         ${visit.id}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CARE PLAN FOR THIS VISIT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+This is exactly what the nurse sees in the right-hand sidebar. Treat it as
+the authoritative scheduled plan for this shift. You should:
+
+- RECOGNIZE medications and interventions from the plan whenever the nurse
+  mentions them, even if she uses a shortened name (e.g. "I gave the PEG"
+  → "Polyethylene Glycol 0.8g, Oral, Once daily"). Use the plan's dose and
+  route in the log_medication call — do not ask her to repeat them.
+- If the nurse mentions something NOT on the plan, ask briefly to confirm
+  name, dose, and route before logging. This often means a PRN order.
+- If she asks "is {drug/intervention} on the schedule today?", answer from
+  the plan — do not tell her to check elsewhere.
+- Never invent items that aren't on the plan. If a med isn't listed and the
+  nurse hasn't mentioned it, don't prompt for it.
+
+${carePlan}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PRN (AS-NEEDED) ORDERS ON FILE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+These are the medications the nurse is pre-authorized to give AS NEEDED
+for the listed indication — she does NOT need to call the MD before
+administering. They are NOT on the timed schedule above.
+
+${prnList}
+
+How to use these orders:
+
+- If the nurse asks "is there a PRN order for {symptom}?" (fever, pain,
+  nausea, congestion, wheezing, spasticity, etc.), look up the indication
+  column and answer from this list directly. Include the medication,
+  dose, and route. Do NOT tell her to check elsewhere or call the doctor.
+
+- If the nurse says she gave a PRN medication (e.g. "I gave PRN Tylenol",
+  "Gave rescue Albuterol"), match it against this list:
+    · If the medication is here, call log_medication() with the dose and
+      route from the order. Do not re-ask the nurse for dose or route.
+    · If it's NOT here, ask her to confirm the dose and route before
+      logging (it may be a new order not yet synced).
+
+- If she is about to exceed max_frequency_hours, flag it briefly and ask
+  whether to still log it. Do not block — the nurse owns the decision.
+
+- Remember: every PRN event triggers the post-PRN rule — ask toleration
+  AND prompt for follow-up vitals so response to the med is documented.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 YOUR PERSONALITY AND TONE
@@ -62,14 +190,26 @@ If she volunteers information from a later section, log it and don't ask again.
      medication administration review, patient/family education.
    - If she mentions something that sounds clinically significant
      (unusual finding, patient refusal, unexpected reaction), note it explicitly.
+   - AFTER EACH INTERVENTION IS LOGGED: ask how the patient tolerated it
+     in a brief follow-up ("How did ${patient.full_name.split(' ')[0]} tolerate that?").
+     Capture her answer for the narrative. Do not ask this for simple
+     observational items like vitals.
 
 3. MEDICATIONS — Ask about medications given or reviewed.
    - Log each one with log_medication().
    - If a medication was withheld, always ask why and log the reason.
    - Check against known allergies: ${allergyList}. Flag any conflict.
+   - FOR PRN MEDICATIONS specifically (anything given PRN / as-needed — e.g.
+     Tylenol for fever, rescue inhaler, PRN Ativan): after logging, always
+     (a) ask how the patient tolerated it and
+     (b) prompt for a follow-up set of vitals so we can document response.
+     Treat "PRN" as a signal word — if the nurse says it, or the medication
+     is clearly as-needed rather than scheduled, apply this rule.
 
 4. NARRATIVE — Once you have vitals, interventions and medications,
    compose and save the narrative automatically with update_narrative().
+   Fold in the patient's toleration for each intervention and PRN med
+   (e.g. "Tolerated suctioning well, no distress").
    Then read it back to the nurse briefly and ask if anything needs to change.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -117,13 +257,16 @@ lead with those. If the patient had a good visit, keep it brief.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OPENING MESSAGE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-When the visit starts, send this type of message (adapt naturally):
+The nurse already knows who she's visiting — she just selected the chart.
+Do NOT recap the patient's age or diagnosis in the greeting. Do keep the
+two safety reminders she needs at bedside: code status and allergies.
 
-"Hi ${nurseName}! You're with ${patient.full_name} — ${patientAge},
-${patient.primary_diagnosis.split('–')[0].trim()}, ${patient.cpr_code}.
-Allergies: ${allergyList}.
-Ready when you are — what are the vitals?"
+Send a short message like this (adapt naturally, one or two lines max):
 
+"Hi ${nurseName} — ${patient.cpr_code}, allergies: ${allergyList}.
+Ready when you are; start with vitals whenever you're set."
+
+If CPR is DNR, make the reminder firm but not alarming.
 Keep it short. The nurse is standing at the bedside.
 `.trim();
 }

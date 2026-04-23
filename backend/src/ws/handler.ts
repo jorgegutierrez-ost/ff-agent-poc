@@ -1,5 +1,11 @@
 import type { WebSocket } from 'ws';
-import { getVisitWithPatient, getConversationHistory, saveMessage } from '../db/queries';
+import {
+  getVisitWithPatient,
+  getConversationHistory,
+  saveMessage,
+  getScheduledTasks,
+  getPrnOrders,
+} from '../db/queries';
 import { runAgentLoop } from '../agent/agentLoop';
 
 // Track active connections per visitId
@@ -47,11 +53,23 @@ export function handleWebSocket(ws: WebSocket): void {
             return;
           }
 
-          // Load conversation history
-          const history = await getConversationHistory(visitId);
+          // Load conversation history + care plan
+          const [history, scheduledTasks, prnOrders] = await Promise.all([
+            getConversationHistory(visitId),
+            getScheduledTasks(data.patient.id),
+            getPrnOrders(data.patient.id),
+          ]);
 
           // Run agent loop — will stream the opening greeting
-          await runAgentLoop(ws, visitId, data.patient, data.visit, history);
+          await runAgentLoop(
+            ws,
+            visitId,
+            data.patient,
+            data.visit,
+            history,
+            scheduledTasks,
+            prnOrders,
+          );
           break;
         }
 
@@ -75,10 +93,22 @@ export function handleWebSocket(ws: WebSocket): void {
             return;
           }
 
-          const history = await getConversationHistory(visitId);
+          const [history, scheduledTasks, prnOrders] = await Promise.all([
+            getConversationHistory(visitId),
+            getScheduledTasks(data.patient.id),
+            getPrnOrders(data.patient.id),
+          ]);
 
           // Run agent loop
-          await runAgentLoop(ws, visitId, data.patient, data.visit, history);
+          await runAgentLoop(
+            ws,
+            visitId,
+            data.patient,
+            data.visit,
+            history,
+            scheduledTasks,
+            prnOrders,
+          );
           break;
         }
 

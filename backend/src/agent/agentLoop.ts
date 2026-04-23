@@ -1,7 +1,11 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { WebSocket } from 'ws';
 import type { Patient, Visit, ConversationMessage } from '../types';
-import { buildSystemPrompt } from './systemPrompt';
+import {
+  buildSystemPrompt,
+  type ScheduledTaskForPrompt,
+  type PrnOrderForPrompt,
+} from './systemPrompt';
 import { TOOL_DEFINITIONS, executeToolCall } from './tools';
 import { saveMessage } from '../db/queries';
 
@@ -189,8 +193,16 @@ export async function runAgentLoop(
   patient: Patient,
   visit: Visit,
   conversationHistory: ConversationMessage[],
+  scheduledTasks: ScheduledTaskForPrompt[] = [],
+  prnOrders: PrnOrderForPrompt[] = [],
 ): Promise<void> {
-  const systemPrompt = buildSystemPrompt(patient, visit, NURSE_NAME);
+  const systemPrompt = buildSystemPrompt(
+    patient,
+    visit,
+    NURSE_NAME,
+    scheduledTasks,
+    prnOrders,
+  );
   let messages = toAnthropicMessages(conversationHistory);
 
   // If no messages yet, add a synthetic user message to trigger the greeting

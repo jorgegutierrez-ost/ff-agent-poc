@@ -296,6 +296,7 @@ export default function PatientListPage({
           <PatientDetailSidebar
             patient={selectedPatient}
             visit={selectedVisit}
+            visits={visits}
             onClose={() => setSelectedPatientId(null)}
             onBeginVisit={onBeginVisit}
           />
@@ -313,6 +314,7 @@ export default function PatientListPage({
             <PatientDetailSidebar
               patient={selectedPatient}
               visit={selectedVisit}
+              visits={visits}
               onClose={() => setSelectedPatientId(null)}
               onBeginVisit={onBeginVisit}
             />

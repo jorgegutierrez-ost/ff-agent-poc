@@ -118,34 +118,154 @@ export async function seed(): Promise<void> {
   }
 
   // Scheduled tasks per patient (care plan)
+  // Ordered by time within each patient so sort_order aligns with scheduled_time.
   const SCHEDULED_TASKS = [
-    // ── Carlos Mendoza (5mo infant, PDN) ──
-    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'vitals', label: 'Vital signs check', sublabel: 'Weight, temp, HR, RR, O2 sat', scheduled_time: '08:00', sort_order: 1 },
-    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'medication', label: 'Ranitidine 15mg', sublabel: 'Oral · Twice daily', scheduled_time: '08:15', sort_order: 2 },
-    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'intervention', label: 'Tracheostomy suctioning', sublabel: 'PRN · Check airway patency', scheduled_time: '08:30', sort_order: 3 },
-    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'intervention', label: 'Trach site care', sublabel: 'Clean and assess stoma site', scheduled_time: '08:30', sort_order: 4 },
-    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'medication', label: 'Albuterol 1.25mg', sublabel: 'Nebulizer · Every 6h', scheduled_time: '08:45', sort_order: 5 },
-    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'intervention', label: 'G-tube feeding', sublabel: 'Formula per dietitian orders', scheduled_time: '08:50', sort_order: 6 },
-    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'narrative', label: 'Visit narrative', sublabel: 'Document findings and plan', scheduled_time: '08:55', sort_order: 7 },
+    // ── Carlos Mendoza (5mo infant, PDN with trach + G-tube) ──
+    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'vitals',       label: 'Vital signs check',       sublabel: 'Weight, temp, HR, RR, O2 sat',   scheduled_time: '08:00' },
+    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'medication',   label: 'Ranitidine 15mg',          sublabel: 'Oral · Twice daily',              scheduled_time: '08:10' },
+    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'medication',   label: 'Budesonide 0.25mg',        sublabel: 'Nebulizer · Twice daily',         scheduled_time: '08:15' },
+    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'intervention', label: 'Tracheostomy suctioning',  sublabel: 'PRN · Check airway patency',      scheduled_time: '08:20' },
+    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'intervention', label: 'Trach site care',          sublabel: 'Clean and assess stoma site',     scheduled_time: '08:25' },
+    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'medication',   label: 'Polyethylene Glycol 0.8g', sublabel: 'Oral · Once daily',               scheduled_time: '08:30' },
+    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'medication',   label: 'Vitamin D 400 IU',         sublabel: 'Oral · Once daily',               scheduled_time: '08:35' },
+    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'medication',   label: 'Albuterol 1.25mg',         sublabel: 'Nebulizer · Every 6h',            scheduled_time: '08:40' },
+    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'medication',   label: 'Ferrous Sulfate 6.25mg',   sublabel: 'Oral · Once daily',               scheduled_time: '08:45' },
+    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'intervention', label: 'G-tube feeding',           sublabel: 'Formula per dietitian orders',    scheduled_time: '08:50' },
+    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'vitals',       label: 'End-of-shift vitals',      sublabel: 'Repeat core vitals before sign-out', scheduled_time: '08:55' },
+    { patient_id: '10000000-0000-0000-0000-000000000001', type: 'narrative',    label: 'Visit narrative',          sublabel: 'Document findings and plan',      scheduled_time: '08:58' },
 
-    // ── Liam O'Brien (4yo, cerebral palsy) ──
-    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'vitals', label: 'Vital signs check', sublabel: 'Temp, HR, RR, O2 sat, pain scale', scheduled_time: '13:00', sort_order: 1 },
-    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'medication', label: 'Baclofen 5mg', sublabel: 'Oral · Three times daily', scheduled_time: '13:15', sort_order: 2 },
-    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'medication', label: 'Diazepam 2mg', sublabel: 'Oral · Twice daily', scheduled_time: '13:15', sort_order: 3 },
-    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'intervention', label: 'Range of motion exercises', sublabel: 'Upper and lower extremities', scheduled_time: '13:30', sort_order: 4 },
-    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'intervention', label: 'Positioning and skin check', sublabel: 'Reposition · Assess pressure areas', scheduled_time: '13:30', sort_order: 5 },
-    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'medication', label: 'Glycopyrrolate 1mg', sublabel: 'Oral · Three times daily', scheduled_time: '13:45', sort_order: 6 },
-    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'narrative', label: 'Visit narrative', sublabel: 'Document findings and plan', scheduled_time: '13:55', sort_order: 7 },
+    // ── Liam O'Brien (4yo, spastic quadriplegic cerebral palsy) ──
+    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'vitals',       label: 'Vital signs check',        sublabel: 'Temp, HR, RR, O2 sat, pain scale', scheduled_time: '13:00' },
+    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'medication',   label: 'Baclofen 5mg',             sublabel: 'Oral · Three times daily',          scheduled_time: '13:10' },
+    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'medication',   label: 'Diazepam 2mg',             sublabel: 'Oral · Twice daily',                scheduled_time: '13:15' },
+    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'medication',   label: 'Levetiracetam 250mg',      sublabel: 'Oral · Twice daily',                scheduled_time: '13:20' },
+    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'medication',   label: 'Gabapentin 100mg',         sublabel: 'Oral · Three times daily',          scheduled_time: '13:25' },
+    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'intervention', label: 'Range of motion exercises', sublabel: 'Upper and lower extremities',       scheduled_time: '13:30' },
+    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'intervention', label: 'Positioning and skin check', sublabel: 'Reposition · Assess pressure areas', scheduled_time: '13:35' },
+    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'medication',   label: 'Polyethylene Glycol 8.5g',  sublabel: 'Oral · Once daily',                 scheduled_time: '13:40' },
+    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'medication',   label: 'Glycopyrrolate 1mg',        sublabel: 'Oral · Three times daily',          scheduled_time: '13:45' },
+    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'medication',   label: 'Melatonin 3mg',             sublabel: 'Oral · At bedtime',                 scheduled_time: '13:50' },
+    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'vitals',       label: 'End-of-shift vitals',       sublabel: 'Repeat core vitals before sign-out', scheduled_time: '13:55' },
+    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'narrative',    label: 'Visit narrative',           sublabel: 'Document findings and plan',        scheduled_time: '13:58' },
   ];
 
-  for (const t of SCHEDULED_TASKS) {
+  // Reset scheduled tasks for these patients so the seed list is authoritative.
+  // Safe: no FK points back to scheduled_tasks.
+  const seedPatientIds = Array.from(new Set(SCHEDULED_TASKS.map((t) => t.patient_id)));
+  await pool.query(
+    `DELETE FROM scheduled_tasks WHERE patient_id = ANY($1::uuid[])`,
+    [seedPatientIds],
+  );
+
+  for (let i = 0; i < SCHEDULED_TASKS.length; i++) {
+    const t = SCHEDULED_TASKS[i];
     await pool.query(
       `INSERT INTO scheduled_tasks (patient_id, type, label, sublabel, scheduled_time, sort_order)
-       SELECT $1, $2, $3, $4, $5, $6
-       WHERE NOT EXISTS (
-         SELECT 1 FROM scheduled_tasks WHERE patient_id = $1 AND label = $3 AND scheduled_time = $5
-       )`,
-      [t.patient_id, t.type, t.label, t.sublabel, t.scheduled_time, t.sort_order],
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [t.patient_id, t.type, t.label, t.sublabel, t.scheduled_time, i + 1],
+    );
+  }
+
+  // ── PRN orders (as-needed meds on standing order) ────────────────────
+  const PRN_ORDERS = [
+    // Carlos Mendoza (5mo, PDN, trach + G-tube)
+    {
+      patient_id: '10000000-0000-0000-0000-000000000001',
+      medication: 'Acetaminophen',
+      dose: '40mg (1.25mL)',
+      route: 'Oral / G-tube',
+      indication: 'Fever ≥ 101°F or discomfort',
+      max_frequency_hours: 4,
+      notes: 'Max 5 doses in 24h. Call MD if fever persists > 24h.',
+    },
+    {
+      patient_id: '10000000-0000-0000-0000-000000000001',
+      medication: 'Albuterol',
+      dose: '1.25mg',
+      route: 'Nebulizer',
+      indication: 'Respiratory distress / wheezing',
+      max_frequency_hours: 4,
+      notes: 'May repeat once after 20 min if no relief. Notify MD after 2 rescue doses.',
+    },
+    {
+      patient_id: '10000000-0000-0000-0000-000000000001',
+      medication: 'Simethicone',
+      dose: '20mg (0.3mL)',
+      route: 'Oral / G-tube',
+      indication: 'Gas / abdominal discomfort',
+      max_frequency_hours: 6,
+      notes: 'Shake well before administration.',
+    },
+    {
+      patient_id: '10000000-0000-0000-0000-000000000001',
+      medication: 'Saline nasal drops',
+      dose: '1–2 drops per nostril',
+      route: 'Intranasal',
+      indication: 'Nasal congestion',
+      max_frequency_hours: 4,
+      notes: 'Follow with bulb suction if secretions thick.',
+    },
+
+    // Liam O'Brien (4yo, spastic quadriplegic CP)
+    {
+      patient_id: '10000000-0000-0000-0000-000000000003',
+      medication: 'Acetaminophen',
+      dose: '240mg (7.5mL)',
+      route: 'Oral',
+      indication: 'Fever ≥ 101°F or pain 4+/10',
+      max_frequency_hours: 4,
+      notes: 'Max 5 doses in 24h.',
+    },
+    {
+      patient_id: '10000000-0000-0000-0000-000000000003',
+      medication: 'Ibuprofen',
+      dose: '100mg (5mL)',
+      route: 'Oral',
+      indication: 'Pain 5+/10 unrelieved by Acetaminophen',
+      max_frequency_hours: 6,
+      notes: 'Give with food. Do not combine with ASA.',
+    },
+    {
+      patient_id: '10000000-0000-0000-0000-000000000003',
+      medication: 'Diazepam',
+      dose: '2mg',
+      route: 'Oral',
+      indication: 'Breakthrough spasticity / seizure',
+      max_frequency_hours: 8,
+      notes: 'Notify MD after any rescue use. Monitor sedation.',
+    },
+    {
+      patient_id: '10000000-0000-0000-0000-000000000003',
+      medication: 'Ondansetron',
+      dose: '2mg (ODT)',
+      route: 'Oral (dissolvable)',
+      indication: 'Nausea / vomiting',
+      max_frequency_hours: 8,
+      notes: 'Hold feeds 30 min after dose.',
+    },
+    {
+      patient_id: '10000000-0000-0000-0000-000000000003',
+      medication: 'Glycerin suppository',
+      dose: '1 pediatric supp',
+      route: 'Rectal',
+      indication: 'Constipation > 48h',
+      max_frequency_hours: 24,
+      notes: 'Only if daily PEG has not produced a bowel movement.',
+    },
+  ];
+
+  const prnPatientIds = Array.from(new Set(PRN_ORDERS.map((o) => o.patient_id)));
+  await pool.query(
+    `DELETE FROM patient_prn_orders WHERE patient_id = ANY($1::uuid[])`,
+    [prnPatientIds],
+  );
+
+  for (const o of PRN_ORDERS) {
+    await pool.query(
+      `INSERT INTO patient_prn_orders
+         (patient_id, medication, dose, route, indication, max_frequency_hours, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [o.patient_id, o.medication, o.dose, o.route, o.indication, o.max_frequency_hours, o.notes],
     );
   }
 

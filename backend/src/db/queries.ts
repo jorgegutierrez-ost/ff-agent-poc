@@ -258,3 +258,27 @@ export async function getScheduledTasks(patientId: string): Promise<ScheduledTas
   );
   return rows;
 }
+
+export interface PrnOrderRow {
+  id: string;
+  patient_id: string;
+  medication: string;
+  dose: string;
+  route: string;
+  indication: string;
+  max_frequency_hours: number | null;
+  notes: string | null;
+  active: boolean;
+}
+
+export async function getPrnOrders(patientId: string): Promise<PrnOrderRow[]> {
+  const { rows } = await pool.query(
+    `SELECT id, patient_id, medication, dose, route, indication,
+            max_frequency_hours, notes, active
+       FROM patient_prn_orders
+      WHERE patient_id = $1 AND active = true
+      ORDER BY medication`,
+    [patientId],
+  );
+  return rows;
+}

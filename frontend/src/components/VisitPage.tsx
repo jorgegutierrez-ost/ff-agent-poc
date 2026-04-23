@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from 'react';
 import type { Patient, Visit, ChatMessage, ScheduleItem } from '../types';
 import type { ActiveForm } from './ChatPanel';
 import { API_BASE } from '../config';
+import { fuzzyMatch } from '../lib/medicationMatch';
 import VisitSchedule from './VisitSchedule';
 import ChatPanel from './ChatPanel';
 
@@ -26,39 +27,6 @@ function getInitials(name: string): string {
     .slice(0, 2);
 }
 
-// Extract just the drug/procedure name, stripping doses like "25mg", "2.5ml", "100mcg"
-function extractName(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/\d+(\.\d+)?\s*(mg|mcg|ml|g|units?|iu|meq|%)/gi, '') // strip doses
-    .replace(/[^a-z]/g, '') // letters only
-    .trim();
-}
-
-// Fuzzy match: compare drug/procedure names ignoring doses and formatting
-function fuzzyMatch(scheduleLabel: string, toolName: string): boolean {
-  // Full normalized comparison
-  const a = scheduleLabel.toLowerCase().replace(/[^a-z0-9]/g, '');
-  const b = toolName.toLowerCase().replace(/[^a-z0-9]/g, '');
-  if (a === b) return true;
-  if (a.includes(b) || b.includes(a)) return true;
-
-  // Name-only comparison (strip doses)
-  const aName = extractName(scheduleLabel);
-  const bName = extractName(toolName);
-  if (aName.length > 3 && bName.length > 3) {
-    if (aName === bName) return true;
-    if (aName.includes(bName) || bName.includes(aName)) return true;
-  }
-
-  // First word comparison (e.g. "ranitidine" matches regardless of dose)
-  const aFirst = scheduleLabel.toLowerCase().split(/\s+/)[0].replace(/[^a-z]/g, '');
-  const bFirst = toolName.toLowerCase().split(/\s+/)[0].replace(/[^a-z]/g, '');
-  if (aFirst.length > 3 && bFirst.length > 3 && (aFirst === bFirst || aFirst.includes(bFirst) || bFirst.includes(aFirst))) return true;
-
-  return false;
-}
-
 export default function VisitPage({
   patient,
   visit,
@@ -74,65 +42,136 @@ export default function VisitPage({
   );
   const [activeForm, setActiveForm] = useState<ActiveForm | null>(null);
 
-  // Load scheduled tasks from backend
+  // Load scheduled tasks AND already-logged events, then mark scheduled
+  // items as completed if they were already fulfilled on a prior visit open.
   useEffect(() => {
-    fetch(`${API_BASE}/api/visits/${visit.id}/schedule`)
-      .then((r) => {
-        if (!r.ok) throw new Error();
-        return r.json();
-      })
-      .then((tasks: Array<{ id: string; type: string; label: string; sublabel: string | null; scheduled_time: string }>) => {
-        const quickActionsForType = (type: string): ScheduleItem['quickActions'] => {
-          switch (type) {
-            case 'vitals':
-              return [
-                { label: 'Record vitals', value: 'record_vitals', variant: 'primary' },
-                { label: 'Skipped', value: 'skip_vitals', variant: 'secondary' },
-              ];
-            case 'medication':
-              return [
-                { label: 'Yes, given', value: 'med_given', variant: 'primary' },
-                { label: 'Skipped', value: 'med_skipped', variant: 'secondary' },
-                { label: 'Modified', value: 'med_modified', variant: 'secondary' },
-              ];
-            case 'intervention':
-              return [
-                { label: 'Done', value: 'intervention_done', variant: 'primary' },
-                { label: 'Not needed', value: 'intervention_skip', variant: 'secondary' },
-              ];
-            case 'narrative':
-              return [
-                { label: 'Write narrative', value: 'write_narrative', variant: 'primary' },
-              ];
-            default:
-              return [];
-          }
-        };
+    Promise.all([
+      fetch(`${API_BASE}/api/visits/${visit.id}/schedule`).then((r) =>
+        r.ok ? r.json() : [],
+      ),
+      fetch(`${API_BASE}/api/visits/${visit.id}/summary`).then((r) =>
+        r.ok ? r.json() : { vitals: null, interventions: [], medications: [], narrative: null },
+      ),
+    ])
+      .then(
+        ([tasks, summary]: [
+          Array<{ id: string; type: string; label: string; sublabel: string | null; scheduled_time: string }>,
+          {
+            vitals: { recorded_at?: string } | null;
+            all_vitals?: Array<{ recorded_at: string }>;
+            interventions: Array<{ name: string; recorded_at: string }>;
+            medications: Array<{ name: string; given: boolean; reason_withheld?: string; recorded_at: string }>;
+            narrative: { updated_at?: string } | null;
+          },
+        ]) => {
+          const quickActionsForType = (type: string): ScheduleItem['quickActions'] => {
+            switch (type) {
+              case 'vitals':
+                return [
+                  { label: 'Record vitals', value: 'record_vitals', variant: 'primary' },
+                  { label: 'Skipped', value: 'skip_vitals', variant: 'secondary' },
+                ];
+              case 'medication':
+                return [
+                  { label: 'Yes, given', value: 'med_given', variant: 'primary' },
+                  { label: 'Skipped', value: 'med_skipped', variant: 'secondary' },
+                  { label: 'Modified', value: 'med_modified', variant: 'secondary' },
+                ];
+              case 'intervention':
+                return [
+                  { label: 'Done', value: 'intervention_done', variant: 'primary' },
+                  { label: 'Not needed', value: 'intervention_skip', variant: 'secondary' },
+                ];
+              case 'narrative':
+                return [
+                  { label: 'Write narrative', value: 'write_narrative', variant: 'primary' },
+                ];
+              default:
+                return [];
+            }
+          };
 
-        // Determine if overdue (scheduled time is before now)
-        const now = new Date();
-        const nowMinutes = now.getHours() * 60 + now.getMinutes();
+          const now = new Date();
+          const nowMinutes = now.getHours() * 60 + now.getMinutes();
 
-        setScheduleItems(
-          tasks.map((t) => {
+          // Mutable pools we "consume" as we match against schedule items,
+          // so one logged entry never counts toward two scheduled slots.
+          const medsPool = [...(summary.medications ?? [])];
+          const intPool = [...(summary.interventions ?? [])];
+          const vitalsPool = [...(summary.all_vitals ?? [])];
+          const hasNarrative = !!summary.narrative;
+
+          const formatTime = (iso?: string): string | undefined => {
+            if (!iso) return undefined;
+            const d = new Date(iso);
+            if (Number.isNaN(d.getTime())) return undefined;
+            return d.toLocaleTimeString('en-US', {
+              hour: '2-digit',
+              minute: '2-digit',
+              hour12: false,
+            });
+          };
+
+          // Schedule order matters for vitals (start-of-shift consumes the
+          // first logged row, end-of-shift the second, etc.), so keep the
+          // server's sort_order by iterating in-place.
+          const items: ScheduleItem[] = tasks.map((t) => {
             const [h, m] = t.scheduled_time.split(':').map(Number);
             const taskMinutes = h * 60 + m;
-            const isOverdue = taskMinutes < nowMinutes;
+
+            let status: ScheduleItem['status'] = 'pending';
+            let completedAt: string | undefined;
+            let completedAction: string | undefined;
+
+            if (t.type === 'medication') {
+              const idx = medsPool.findIndex((lm) => fuzzyMatch(t.label, lm.name));
+              if (idx >= 0) {
+                const match = medsPool.splice(idx, 1)[0];
+                status = match.given ? 'completed' : 'skipped';
+                completedAction = match.given ? 'given' : 'withheld';
+                completedAt = formatTime(match.recorded_at);
+              }
+            } else if (t.type === 'intervention') {
+              const idx = intPool.findIndex((li) => fuzzyMatch(t.label, li.name));
+              if (idx >= 0) {
+                const match = intPool.splice(idx, 1)[0];
+                status = 'completed';
+                completedAction = 'done';
+                completedAt = formatTime(match.recorded_at);
+              }
+            } else if (t.type === 'vitals') {
+              const match = vitalsPool.shift();
+              if (match) {
+                status = 'completed';
+                completedAction = 'recorded';
+                completedAt = formatTime(match.recorded_at);
+              }
+            } else if (t.type === 'narrative' && hasNarrative) {
+              status = 'completed';
+              completedAction = 'done';
+              completedAt = formatTime(summary.narrative?.updated_at);
+            }
+
+            const isOverdue = status === 'pending' && taskMinutes < nowMinutes;
             const lateMinutes = isOverdue ? nowMinutes - taskMinutes : undefined;
 
             return {
               id: t.id,
               type: t.type as ScheduleItem['type'],
-              status: isOverdue ? 'overdue' : 'pending',
+              status: isOverdue ? 'overdue' : status,
               scheduledTime: t.scheduled_time,
               label: t.label,
               sublabel: t.sublabel ?? '',
               lateMinutes,
               quickActions: quickActionsForType(t.type),
+              completedAt,
+              completedAction,
             };
-          }),
-        );
-      })
+          });
+
+          setScheduleItems(items);
+        },
+      )
       .catch(() => {});
   }, [visit.id]);
 
@@ -156,31 +195,23 @@ export default function VisitPage({
             (si) => si.type === 'vitals' && (si.status === 'pending' || si.status === 'overdue'),
           );
         } else if (tool === 'log_medication') {
-          // Try exact fuzzy match on medication name first
+          // Name must fuzzy-match a scheduled med. PRN meds and ad-hoc
+          // admins are not on the schedule — if we fall back to "first
+          // pending" we mark an unrelated item as done.
           matchIdx = prev.findIndex(
             (si) =>
               si.type === 'medication' &&
               (si.status === 'pending' || si.status === 'overdue') &&
               fuzzyMatch(si.label, toolInputName),
           );
-          // Fallback: first pending medication
-          if (matchIdx === -1) {
-            matchIdx = prev.findIndex(
-              (si) => si.type === 'medication' && (si.status === 'pending' || si.status === 'overdue'),
-            );
-          }
         } else if (tool === 'log_intervention') {
+          // Same rule as medications — strict name match, no fallback.
           matchIdx = prev.findIndex(
             (si) =>
               si.type === 'intervention' &&
               (si.status === 'pending' || si.status === 'overdue') &&
               fuzzyMatch(si.label, toolInputName),
           );
-          if (matchIdx === -1) {
-            matchIdx = prev.findIndex(
-              (si) => si.type === 'intervention' && (si.status === 'pending' || si.status === 'overdue'),
-            );
-          }
         } else if (tool === 'update_narrative') {
           matchIdx = prev.findIndex(
             (si) => si.type === 'narrative' && (si.status === 'pending' || si.status === 'overdue'),

@@ -104,6 +104,24 @@ CREATE TABLE IF NOT EXISTS scheduled_tasks (
 
 CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_patient ON scheduled_tasks(patient_id, sort_order);
 
+CREATE TABLE IF NOT EXISTS patient_prn_orders (
+  id                    UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  patient_id            UUID NOT NULL REFERENCES patients(id),
+  medication            TEXT NOT NULL,
+  dose                  TEXT NOT NULL,
+  route                 TEXT NOT NULL,
+  indication            TEXT NOT NULL,
+  max_frequency_hours   NUMERIC(5,2),
+  notes                 TEXT,
+  active                BOOLEAN NOT NULL DEFAULT true,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_patient_prn_orders_patient
+  ON patient_prn_orders(patient_id)
+  WHERE active = true;
+
 CREATE TABLE IF NOT EXISTS conversation_messages (
   id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   visit_id    UUID NOT NULL REFERENCES visits(id),

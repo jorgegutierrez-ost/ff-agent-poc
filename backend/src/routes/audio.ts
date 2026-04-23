@@ -2,6 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import { ElevenLabsClient } from '@elevenlabs/elevenlabs-js';
 import { Readable } from 'stream';
+import { applyPronunciation, stripMarkdown } from '../agent/pronunciation';
 
 const router = Router();
 
@@ -62,12 +63,21 @@ router.post('/tts', async (req, res) => {
     }
 
     const voiceId = process.env.ELEVENLABS_VOICE_ID ?? 'EXAVITQu4vr4xnSDxMaL';
+    // Default to turbo_v2 because it supports <phoneme> SSML tags, which is
+    // how we fix drug-name pronunciation. Override via env if you want to A/B.
+    const modelId = process.env.ELEVENLABS_MODEL_ID ?? 'eleven_turbo_v2';
 
-    console.log(`[audio/tts] Generating speech for ${text.length} chars, voice=${voiceId}`);
+    // Strip markdown first so emphasis markers aren't read as "asterisk
+    // asterisk", then rewrite medical terms. The UI text is untouched.
+    const speakText = applyPronunciation(stripMarkdown(text), modelId);
+
+    console.log(
+      `[audio/tts] Generating ${speakText.length} chars · voice=${voiceId} · model=${modelId}`,
+    );
 
     const audioStream = await getClient().textToSpeech.stream(voiceId, {
-      text,
-      modelId: 'eleven_multilingual_v2',
+      text: speakText,
+      modelId,
       outputFormat: 'mp3_44100_128',
     });
 
