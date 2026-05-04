@@ -5,6 +5,12 @@ export interface ScheduledTaskForPrompt {
   label: string;
   sublabel: string | null;
   scheduled_time: string; // HH:MM:SS or HH:MM
+  // Medication-only structured fields. Null/absent for non-med tasks.
+  dose?: string | null;
+  concentration?: string | null;
+  route?: string | null;
+  indication?: string | null;
+  instructions?: string | null;
 }
 
 export interface PrnOrderForPrompt {
@@ -44,8 +50,18 @@ function renderCarePlan(tasks: ScheduledTaskForPrompt[]): string {
     lines.push('Scheduled medications:');
     for (const m of byType.medication) {
       const time = m.scheduled_time.slice(0, 5);
-      const sub = m.sublabel ? ` — ${m.sublabel}` : '';
-      lines.push(`  • ${time} · ${m.label}${sub}`);
+      // Render the same six safety fields the nurse sees on the card.
+      // Pieces concatenated with ' · ' so missing values cleanly drop out.
+      const dosePart = [m.dose, m.concentration, m.route]
+        .filter((p): p is string => Boolean(p))
+        .join(' · ');
+      const dosePiece = dosePart ? ` — ${dosePart}` : '';
+      const indPiece = m.indication ? ` — for ${m.indication}` : '';
+      const freqPiece = m.sublabel ? ` (${m.sublabel})` : '';
+      lines.push(`  • ${time} · ${m.label}${dosePiece}${indPiece}${freqPiece}`);
+      if (m.instructions) {
+        lines.push(`        Instructions: ${m.instructions}`);
+      }
     }
   }
 
@@ -196,7 +212,7 @@ If she volunteers information from a later section, log it and don't ask again.
      observational items like vitals.
 
 3. MEDICATIONS — Ask about medications given or reviewed.
-   - Log each one with log_medication().
+   - Log each one with log_medication(). See MEDICATION SAFETY RULES below.
    - If a medication was withheld, always ask why and log the reason.
    - Check against known allergies: ${allergyList}. Flag any conflict.
    - FOR PRN MEDICATIONS specifically (anything given PRN / as-needed — e.g.
@@ -220,6 +236,54 @@ TOOL USAGE RULES
   "Got those vitals." / "Logged." / "Done."
 - If a tool call fails, tell the nurse simply: "Couldn't save that — let's try again."
 - Always include the visit_id "${visit.id}" in every tool call.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MEDICATION SAFETY RULES (HARD CONSTRAINTS)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+These three rules come directly from the nurses using this app. Do not
+relax them under any circumstance — even if the nurse asks you to.
+
+1. EVENT TIMES — never assume "now".
+   When logging anything that happened in physical time — a medication
+   given (administered_at), vitals taken (occurred_at), or an intervention
+   performed (occurred_at) — the time field must be the actual time the
+   nurse performed the action. Nurses commonly document an hour or two
+   AFTER the fact, so do not stamp the current time automatically.
+
+   - If the nurse states a time ("I gave it at 8:15", "took the temp at
+     8:32", "suctioned at 8:45"), use that.
+   - If she says "just now" or "a minute ago", use the current time.
+   - If she has not stated a time, ASK ONCE: "What time did you give it?"
+     / "What time did you take the vitals?" / "What time did you do that?"
+     Wait for her answer before calling the tool.
+   - For medications specifically, if the time she reports is more than
+     60 minutes off the scheduled dose time on the care plan, push back
+     conversationally one time — for example: "That's about 90 minutes
+     after the 8:00 dose was due — anything I should note about why?"
+     Then log whatever she confirms. Do not block; she owns the decision.
+
+2. ADMINISTRATION INSTRUCTIONS — only from the order, never invented.
+   Each scheduled medication and PRN order may carry an "Instructions:"
+   line in the care plan I gave you (e.g. "Mix in 30 mL of formula",
+   "Hold and notify MD if HR > 180"). Those are the ORDERING PHYSICIAN'S
+   instructions as entered in the chart.
+
+   - If the nurse asks how to give a medication, QUOTE the instructions
+     line verbatim. If there is no Instructions line on that order, say:
+     "There's no administration instruction in the order I have for that.
+     Check KanTime or call the ordering provider to confirm."
+   - NEVER fill in administration instructions from general medical
+     knowledge ("shake well before giving", "give with food", "hold
+     feeds 30 min after"). Even if you are confident the instruction is
+     standard for that drug, it is not safe to relay unless it is in
+     the order.
+   - This rule applies to scheduled meds AND PRN orders.
+
+3. MEDICATION DETAILS — the six safety fields are already on screen.
+   The nurse can see drug name, dose, concentration, route, indication,
+   and frequency on the card without clicking. You do not need to recite
+   them unless she asks. When she asks, read them back from the care
+   plan I gave you — do not paraphrase concentrations or dosages.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CLINICAL AWARENESS

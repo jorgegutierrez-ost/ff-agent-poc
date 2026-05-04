@@ -121,12 +121,18 @@ export async function saveVitals(
   visitId: string,
   data: Record<string, unknown>,
 ): Promise<VitalSigns> {
+  // occurred_at is the time the nurse observed the vitals — captured
+  // explicitly, not auto-stamped, since end-of-shift documentation lags
+  // the actual reading. Falls back to recorded_at via DEFAULT now() at
+  // read time if the nurse can't recall.
+  const occurred = parseTimeInput(data.occurred_at);
+
   const { rows } = await pool.query(
     `INSERT INTO vital_signs (
        visit_id, bp_systolic, bp_diastolic, heart_rate,
        respiratory_rate, temperature_f, o2_saturation,
-       weight_lbs, pain_score, notes
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       weight_lbs, pain_score, notes, occurred_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
      RETURNING *`,
     [
       visitId,
@@ -139,6 +145,7 @@ export async function saveVitals(
       data.weight_lbs ?? null,
       data.pain_score ?? null,
       data.notes ?? null,
+      occurred,
     ],
   );
   return rows[0];
@@ -166,11 +173,13 @@ export async function saveIntervention(
   visitId: string,
   data: Record<string, unknown>,
 ): Promise<Intervention> {
+  const occurred = parseTimeInput(data.occurred_at);
+
   const { rows } = await pool.query(
-    `INSERT INTO interventions (visit_id, name, description, outcome)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO interventions (visit_id, name, description, outcome, occurred_at)
+     VALUES ($1, $2, $3, $4, $5)
      RETURNING *`,
-    [visitId, data.name, data.description ?? null, data.outcome ?? null],
+    [visitId, data.name, data.description ?? null, data.outcome ?? null, occurred],
   );
   return rows[0];
 }
@@ -189,13 +198,57 @@ export async function saveMedication(
   visitId: string,
   data: Record<string, unknown>,
 ): Promise<Medication> {
+  // administered_at is the time the nurse says the dose was given.
+  // It must be supplied explicitly — do NOT fall back to now(), because
+  // nurses often document an hour or two after the actual administration.
+  const adminTime = parseTimeInput(data.administered_at);
+
   const { rows } = await pool.query(
-    `INSERT INTO medications (visit_id, name, dose, route, given, reason_withheld)
-     VALUES ($1, $2, $3, $4, $5, $6)
+    `INSERT INTO medications (
+       visit_id, name, dose, route, given, reason_withheld, administered_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7)
      RETURNING *`,
-    [visitId, data.name, data.dose ?? null, data.route ?? null, data.given, data.reason_withheld ?? null],
+    [
+      visitId,
+      data.name,
+      data.dose ?? null,
+      data.route ?? null,
+      data.given,
+      data.reason_withheld ?? null,
+      adminTime,
+    ],
   );
   return rows[0];
+}
+
+/**
+ * Accepts an ISO-8601 timestamp ("2026-04-30T09:23:00Z"), an HH:MM string
+ * ("09:23"), or null/undefined. Returns a Date or null.
+ *
+ * HH:MM is interpreted as today, local server time. Used for any
+ * nurse-reported clinical time (med admin, vitals reading, intervention
+ * performed) where we must NOT fall back to now() because charting lags
+ * the actual event.
+ */
+function parseTimeInput(value: unknown): Date | null {
+  if (value == null || value === '') return null;
+  const s = String(value).trim();
+
+  // HH:MM or HH:MM:SS — anchor to today
+  const hhmm = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(s);
+  if (hhmm) {
+    const h = Number(hhmm[1]);
+    const m = Number(hhmm[2]);
+    const sec = hhmm[3] ? Number(hhmm[3]) : 0;
+    if (h > 23 || m > 59 || sec > 59) return null;
+    const d = new Date();
+    d.setHours(h, m, sec, 0);
+    return d;
+  }
+
+  const parsed = new Date(s);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed;
 }
 
 export async function getMedications(visitId: string): Promise<Medication[]> {
@@ -246,11 +299,18 @@ export interface ScheduledTaskRow {
   sublabel: string | null;
   scheduled_time: string;
   sort_order: number;
+  // Medication-only fields. Null for vitals/intervention/narrative rows.
+  dose: string | null;
+  concentration: string | null;
+  route: string | null;
+  indication: string | null;
+  instructions: string | null;
 }
 
 export async function getScheduledTasks(patientId: string): Promise<ScheduledTaskRow[]> {
   const { rows } = await pool.query(
-    `SELECT id, patient_id, type, label, sublabel, scheduled_time::text, sort_order
+    `SELECT id, patient_id, type, label, sublabel, scheduled_time::text,
+            sort_order, dose, concentration, route, indication, instructions
      FROM scheduled_tasks
      WHERE patient_id = $1
      ORDER BY sort_order`,

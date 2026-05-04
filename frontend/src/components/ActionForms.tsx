@@ -1,6 +1,69 @@
 import { useState } from 'react';
 import type { ScheduleItem } from '../types';
 
+// ─── Shared time-field helper ────────────────────────────────
+//
+// Reused by every form that captures a clinical event time
+// (vitals taken, medication given, intervention performed). The
+// reason this exists as a shared component instead of inline
+// inputs is that the WHEN matters as much as the WHAT —
+// nurses chart hours after the fact, so we always want a
+// required, editable time with a "Now" anchor and a hint that
+// reminds them this is the EVENT time, not the LOG time.
+
+function nowHHMM(): string {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+const HHMM_RE = /^([01]?\d|2[0-3]):([0-5]\d)$/;
+
+interface TimeFieldProps {
+  label: string;
+  hint: string;
+  value: string;
+  onChange: (next: string) => void;
+  error?: string | null;
+  onClearError?: () => void;
+}
+
+function TimeField({ label, hint, value, onChange, error, onClearError }: TimeFieldProps) {
+  return (
+    <div className="mb-3">
+      <label className="mb-1 block text-[11px] font-medium text-gray-500 uppercase">
+        {label} <span className="text-red-500">*</span>
+      </label>
+      <div className="flex gap-2">
+        <input
+          type="time"
+          required
+          value={value}
+          onChange={(e) => {
+            onChange(e.target.value);
+            onClearError?.();
+          }}
+          className="flex-1 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm tabular-nums text-gray-900 outline-none focus:border-gray-300 focus:bg-white"
+        />
+        <button
+          type="button"
+          onClick={() => {
+            onChange(nowHHMM());
+            onClearError?.();
+          }}
+          className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50"
+        >
+          Now
+        </button>
+      </div>
+      {error ? (
+        <p className="mt-1 text-xs text-red-500">{error}</p>
+      ) : (
+        <p className="mt-1 text-[11px] text-gray-400">{hint}</p>
+      )}
+    </div>
+  );
+}
+
 // ─── Vitals Form ─────────────────────────────────────────────
 
 interface VitalsFormData {
@@ -45,7 +108,9 @@ interface VitalsFormProps {
 
 export function VitalsForm({ item, onSubmit, onCancel }: VitalsFormProps) {
   const [data, setData] = useState<VitalsFormData>(EMPTY_VITALS);
+  const [occurredAt, setOccurredAt] = useState<string>(nowHHMM);
   const [showError, setShowError] = useState(false);
+  const [timeError, setTimeError] = useState<string | null>(null);
 
   const set = (field: keyof VitalsFormData, value: string) => {
     setData((prev) => ({ ...prev, [field]: value }));
@@ -57,7 +122,14 @@ export function VitalsForm({ item, onSubmit, onCancel }: VitalsFormProps) {
       setShowError(true);
       return;
     }
-    onSubmit(item, data as unknown as Record<string, string>);
+    if (!HHMM_RE.test(occurredAt.trim())) {
+      setTimeError('Enter the time you took the vitals (HH:MM, 24-hour).');
+      return;
+    }
+    onSubmit(item, {
+      ...(data as unknown as Record<string, string>),
+      occurred_at: occurredAt.trim(),
+    });
   };
 
   return (
@@ -79,6 +151,15 @@ export function VitalsForm({ item, onSubmit, onCancel }: VitalsFormProps) {
           Please enter at least one vital sign.
         </p>
       )}
+
+      <TimeField
+        label="Time taken"
+        hint="Enter the time you actually took the vitals, not when you're logging them."
+        value={occurredAt}
+        onChange={setOccurredAt}
+        error={timeError}
+        onClearError={() => timeError && setTimeError(null)}
+      />
 
       <div className="space-y-3">
         {/* Blood Pressure */}
@@ -250,7 +331,12 @@ export function MedicationForm({ item, action, onSubmit, onCancel }: MedicationF
   const [dose, setDose] = useState('');
   const [route, setRoute] = useState('');
   const [notes, setNotes] = useState('');
+  // Administration time for med_given. Prefilled with the current time as a
+  // suggestion, but the nurse must confirm or edit it — never silently
+  // committed as "now". Empty string is invalid; HH:MM is required.
+  const [administeredAt, setAdministeredAt] = useState<string>(nowHHMM);
   const [showError, setShowError] = useState(false);
+  const [timeError, setTimeError] = useState<string | null>(null);
 
   const handleSubmit = () => {
     if (action === 'med_skipped' && !reason.trim()) {
@@ -261,10 +347,18 @@ export function MedicationForm({ item, action, onSubmit, onCancel }: MedicationF
       setShowError(true);
       return;
     }
+    if (action === 'med_given') {
+      const t = administeredAt.trim();
+      if (!t || !HHMM_RE.test(t)) {
+        setTimeError('Enter the time you gave the dose (HH:MM, 24-hour).');
+        return;
+      }
+    }
 
     const data: Record<string, string> = { action };
     if (action === 'med_given') {
       data.notes = notes;
+      data.administered_at = administeredAt.trim();
     } else if (action === 'med_skipped') {
       data.reason = reason;
     } else {
@@ -289,6 +383,16 @@ export function MedicationForm({ item, action, onSubmit, onCancel }: MedicationF
           </button>
         </div>
         <p className="mb-3 text-xs text-gray-500">{item.sublabel}</p>
+
+        <TimeField
+          label="Time administered"
+          hint="Enter the time you actually gave the dose, not when you're logging it."
+          value={administeredAt}
+          onChange={setAdministeredAt}
+          error={timeError}
+          onClearError={() => timeError && setTimeError(null)}
+        />
+
         <div>
           <label className="mb-1 block text-[11px] font-medium text-gray-500 uppercase">
             Notes <span className="font-normal text-gray-400">(optional)</span>
@@ -444,17 +548,24 @@ export function InterventionForm({ item, action, onSubmit, onCancel }: Intervent
   const [outcome, setOutcome] = useState('');
   const [notes, setNotes] = useState('');
   const [reason, setReason] = useState('');
+  const [occurredAt, setOccurredAt] = useState<string>(nowHHMM);
   const [showError, setShowError] = useState(false);
+  const [timeError, setTimeError] = useState<string | null>(null);
 
   const handleSubmit = () => {
     if (action === 'intervention_skip' && !reason.trim()) {
       setShowError(true);
       return;
     }
+    if (action === 'intervention_done' && !HHMM_RE.test(occurredAt.trim())) {
+      setTimeError('Enter the time you performed this (HH:MM, 24-hour).');
+      return;
+    }
     const data: Record<string, string> = { action };
     if (action === 'intervention_done') {
       data.outcome = outcome;
       data.notes = notes;
+      data.occurred_at = occurredAt.trim();
     } else {
       data.reason = reason;
     }
@@ -518,6 +629,16 @@ export function InterventionForm({ item, action, onSubmit, onCancel }: Intervent
         </button>
       </div>
       <p className="mb-3 text-xs text-gray-500">{item.sublabel}</p>
+
+      <TimeField
+        label="Time performed"
+        hint="Enter the time you actually did this, not when you're logging it."
+        value={occurredAt}
+        onChange={setOccurredAt}
+        error={timeError}
+        onClearError={() => timeError && setTimeError(null)}
+      />
+
       <div className="space-y-3">
         <div>
           <label className="mb-1 block text-[11px] font-medium text-gray-500 uppercase">

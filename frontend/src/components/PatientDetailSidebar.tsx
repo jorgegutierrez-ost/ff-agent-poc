@@ -17,6 +17,12 @@ interface ScheduledTask {
   label: string;
   sublabel: string | null;
   scheduled_time: string;
+  // Medication-only structured fields. Null on non-med tasks.
+  dose?: string | null;
+  concentration?: string | null;
+  route?: string | null;
+  indication?: string | null;
+  instructions?: string | null;
 }
 
 interface LoggedMedication {
@@ -26,6 +32,7 @@ interface LoggedMedication {
   route?: string;
   given: boolean;
   reason_withheld?: string;
+  administered_at?: string | null;
   recorded_at: string;
 }
 
@@ -44,10 +51,19 @@ type MedicationStatus = 'given' | 'withheld' | 'pending';
 interface MedicationRow {
   id: string;
   time: string; // HH:MM
-  label: string;
-  sublabel: string;
+  label: string;        // drug name only — e.g. "Ranitidine"
+  frequency: string;    // e.g. "Twice daily" (was sublabel)
+  dose: string | null;
+  concentration: string | null;
+  route: string | null;
+  indication: string | null;
+  instructions: string | null;
   status: MedicationStatus;
   reasonWithheld?: string;
+  // When status === 'given', the actual administration time the nurse
+  // recorded (HH:MM, today's local time). Falls back to recorded_at if
+  // administered_at is null on legacy rows.
+  lastGivenAt?: string;
 }
 
 function getInitials(name: string): string {
@@ -122,6 +138,20 @@ export default function PatientDetailSidebar({
   const [prnOrders, setPrnOrders] = useState<PrnOrder[]>([]);
   const [medsExpanded, setMedsExpanded] = useState(false);
   const [prnExpanded, setPrnExpanded] = useState(false);
+  // Per-card expand state for the medication detail panel. Stored as a Set
+  // of scheduled-task IDs so multiple cards can be open at once.
+  const [expandedMedCards, setExpandedMedCards] = useState<Set<string>>(
+    () => new Set(),
+  );
+
+  const toggleMedCard = (id: string) => {
+    setExpandedMedCards((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -166,13 +196,36 @@ export default function PatientDetailSidebar({
       let status: MedicationStatus = 'pending';
       if (match) status = match.given ? 'given' : 'withheld';
 
+      // Prefer the explicit administered_at the nurse entered; only fall
+      // back to recorded_at if a legacy row pre-dates that field.
+      let lastGivenAt: string | undefined;
+      if (match && match.given) {
+        const src = match.administered_at ?? match.recorded_at;
+        if (src) {
+          const d = new Date(src);
+          if (!Number.isNaN(d.getTime())) {
+            lastGivenAt = d.toLocaleTimeString('en-US', {
+              hour: '2-digit',
+              minute: '2-digit',
+              hour12: false,
+            });
+          }
+        }
+      }
+
       return {
         id: t.id,
         time: t.scheduled_time.slice(0, 5),
         label: t.label,
-        sublabel: t.sublabel ?? '',
+        frequency: t.sublabel ?? '',
+        dose: t.dose ?? null,
+        concentration: t.concentration ?? null,
+        route: t.route ?? null,
+        indication: t.indication ?? null,
+        instructions: t.instructions ?? null,
         status,
         reasonWithheld: match && !match.given ? match.reason_withheld : undefined,
+        lastGivenAt,
       };
     });
   }, [tasks, loggedMeds]);
@@ -607,38 +660,106 @@ export default function PatientDetailSidebar({
                           ? { bg: 'bg-amber-50', text: 'text-amber-700', dot: 'bg-amber-500', label: 'Withheld' }
                           : { bg: 'bg-gray-100', text: 'text-gray-500', dot: 'bg-gray-400', label: 'Pending' };
 
+                    // Always-visible safety line: dose · concentration · route.
+                    // Drop any piece that's null so we don't render trailing "·".
+                    const doseLine = [m.dose, m.concentration, m.route]
+                      .filter((p): p is string => Boolean(p))
+                      .join(' · ');
+
+                    const isOpen = expandedMedCards.has(m.id);
+                    const allergies = patient.allergies.join(', ');
+
                     return (
-                      <li key={m.id} className="px-4 py-3">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="flex items-baseline gap-2">
-                              <span className="text-xs font-medium tabular-nums text-gray-500">
-                                {to12h(m.time)}
-                              </span>
-                              <span className="text-sm font-medium text-gray-900">
-                                {m.label}
-                              </span>
+                      <li key={m.id}>
+                        <button
+                          type="button"
+                          onClick={() => toggleMedCard(m.id)}
+                          aria-expanded={isOpen}
+                          className="block w-full px-4 py-3 text-left transition-colors hover:bg-gray-50"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-baseline gap-2">
+                                <span className="text-xs font-medium tabular-nums text-gray-500">
+                                  {to12h(m.time)}
+                                </span>
+                                <span className="text-sm font-semibold text-gray-900">
+                                  {m.label}
+                                </span>
+                              </div>
+
+                              {/* Safety line — six fields visible without click */}
+                              {doseLine && (
+                                <p className="mt-0.5 text-xs text-gray-700">
+                                  {doseLine}
+                                </p>
+                              )}
+                              {(m.indication || m.frequency) && (
+                                <p className="mt-0.5 text-xs text-gray-500">
+                                  {m.indication ? `For: ${m.indication}` : ''}
+                                  {m.indication && m.frequency ? ' · ' : ''}
+                                  {m.frequency}
+                                </p>
+                              )}
+
+                              {m.status === 'withheld' && m.reasonWithheld && (
+                                <p className="mt-1 text-xs text-amber-700">
+                                  Withheld: {m.reasonWithheld}
+                                </p>
+                              )}
                             </div>
-                            {m.sublabel && (
-                              <p className="mt-0.5 text-xs text-gray-500">
-                                {m.sublabel}
-                              </p>
-                            )}
-                            {m.status === 'withheld' && m.reasonWithheld && (
-                              <p className="mt-1 text-xs text-amber-700">
-                                Withheld: {m.reasonWithheld}
-                              </p>
-                            )}
+
+                            <div className="flex shrink-0 flex-col items-end gap-1.5">
+                              <div
+                                className={`flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium ${pill.bg} ${pill.text}`}
+                              >
+                                <span
+                                  className={`inline-block h-1.5 w-1.5 rounded-full ${pill.dot}`}
+                                />
+                                {pill.label}
+                              </div>
+                              <svg
+                                className={`h-4 w-4 text-gray-400 transition-transform ${isOpen ? 'rotate-180' : ''}`}
+                                fill="none"
+                                viewBox="0 0 24 24"
+                                stroke="currentColor"
+                                strokeWidth={1.75}
+                              >
+                                <path
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  d="m19.5 8.25-7.5 7.5-7.5-7.5"
+                                />
+                              </svg>
+                            </div>
                           </div>
-                          <div
-                            className={`flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium ${pill.bg} ${pill.text}`}
-                          >
-                            <span
-                              className={`inline-block h-1.5 w-1.5 rounded-full ${pill.dot}`}
-                            />
-                            {pill.label}
-                          </div>
-                        </div>
+                        </button>
+
+                        {isOpen && (
+                          <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 border-t border-gray-100 bg-gray-50 px-4 py-3 text-xs">
+                            <dt className="text-gray-500">Instructions</dt>
+                            <dd className="text-gray-900">
+                              {m.instructions ?? (
+                                <span className="text-gray-400 italic">
+                                  None on file
+                                </span>
+                              )}
+                            </dd>
+
+                            <dt className="text-gray-500">Last given</dt>
+                            <dd className="text-gray-900 tabular-nums">
+                              {m.lastGivenAt ? to12h(m.lastGivenAt) : (
+                                <span className="text-gray-400">—</span>
+                              )}
+                            </dd>
+
+                            <dt className="text-gray-500">Allergies</dt>
+                            <dd className="text-gray-900">{allergies}</dd>
+
+                            <dt className="text-gray-500">Order source</dt>
+                            <dd className="text-gray-900">Scheduled (KanTime)</dd>
+                          </dl>
+                        )}
                       </li>
                     );
                   })}

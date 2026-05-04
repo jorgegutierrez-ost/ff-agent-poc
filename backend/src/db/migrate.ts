@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS vital_signs (
   weight_lbs        NUMERIC(6,2),
   pain_score        INTEGER CHECK (pain_score >= 0 AND pain_score <= 10),
   notes             TEXT,
+  occurred_at       TIMESTAMPTZ,
   recorded_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -68,6 +69,7 @@ CREATE TABLE IF NOT EXISTS interventions (
   name        TEXT NOT NULL,
   description TEXT,
   outcome     TEXT,
+  occurred_at TIMESTAMPTZ,
   recorded_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -79,6 +81,7 @@ CREATE TABLE IF NOT EXISTS medications (
   route           TEXT,
   given           BOOLEAN NOT NULL,
   reason_withheld TEXT,
+  administered_at TIMESTAMPTZ,
   recorded_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -99,7 +102,12 @@ CREATE TABLE IF NOT EXISTS scheduled_tasks (
   label           TEXT NOT NULL,
   sublabel        TEXT,
   scheduled_time  TIME NOT NULL,
-  sort_order      INTEGER NOT NULL DEFAULT 0
+  sort_order      INTEGER NOT NULL DEFAULT 0,
+  dose            TEXT,
+  concentration   TEXT,
+  route           TEXT,
+  indication      TEXT,
+  instructions    TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_patient ON scheduled_tasks(patient_id, sort_order);
@@ -139,6 +147,17 @@ CREATE INDEX IF NOT EXISTS idx_vital_signs_visit ON vital_signs(visit_id);
 CREATE INDEX IF NOT EXISTS idx_interventions_visit ON interventions(visit_id);
 CREATE INDEX IF NOT EXISTS idx_medications_visit ON medications(visit_id);
 CREATE INDEX IF NOT EXISTS idx_visits_nurse_date ON visits(nurse_id, visit_date);
+
+-- Idempotent column additions for live envs where the table already exists.
+-- Safe to re-run; ADD COLUMN IF NOT EXISTS is a no-op when the column is present.
+ALTER TABLE medications     ADD COLUMN IF NOT EXISTS administered_at TIMESTAMPTZ;
+ALTER TABLE vital_signs     ADD COLUMN IF NOT EXISTS occurred_at     TIMESTAMPTZ;
+ALTER TABLE interventions   ADD COLUMN IF NOT EXISTS occurred_at     TIMESTAMPTZ;
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS dose            TEXT;
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS concentration   TEXT;
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS route           TEXT;
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS indication      TEXT;
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS instructions    TEXT;
 `;
 
 export async function migrate(): Promise<void> {

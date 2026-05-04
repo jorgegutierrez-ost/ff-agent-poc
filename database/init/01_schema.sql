@@ -83,8 +83,11 @@ CREATE TABLE IF NOT EXISTS medications (
   route           TEXT,
   given           BOOLEAN NOT NULL,
   reason_withheld TEXT,
+  administered_at TIMESTAMPTZ,
   recorded_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE medications ADD COLUMN IF NOT EXISTS administered_at TIMESTAMPTZ;
 
 -- ─── Narratives ──────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS narratives (

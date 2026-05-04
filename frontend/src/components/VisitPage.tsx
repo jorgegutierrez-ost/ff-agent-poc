@@ -229,15 +229,16 @@ export default function VisitPage({
         else if (tool === 'log_intervention') completedAction = 'done';
         else if (tool === 'update_narrative') completedAction = 'done';
 
+        // Prefer the actual administration time the agent passed in, when
+        // present and well-formed (HH:MM or ISO). Falls back to now() only
+        // when the tool-call did not carry a time — e.g. vitals, narrative.
+        const completedAt = formatCompletedAt(tool, input);
+
         const updated = [...prev];
         updated[matchIdx] = {
           ...updated[matchIdx],
           status: tool === 'log_medication' && input.given === false ? 'skipped' : 'completed',
-          completedAt: new Date().toLocaleTimeString('en-US', {
-            hour: '2-digit',
-            minute: '2-digit',
-            hour12: false,
-          }),
+          completedAt,
           completedAction,
         };
         return updated;
@@ -385,6 +386,39 @@ export default function VisitPage({
   );
 }
 
+// Resolve the time to display on the schedule item when a tool fires.
+// log_medication uses administered_at; log_vitals and log_intervention
+// use occurred_at. We honor whichever the agent supplied so the panel
+// matches what was stored. Anything else (or a malformed value) falls
+// back to the current local time.
+function formatCompletedAt(tool: string, input: Record<string, unknown>): string {
+  const timeKey =
+    tool === 'log_medication' ? 'administered_at' :
+    (tool === 'log_vitals' || tool === 'log_intervention') ? 'occurred_at' :
+    null;
+
+  if (timeKey && typeof input[timeKey] === 'string') {
+    const raw = (input[timeKey] as string).trim();
+    const hhmm = /^(\d{1,2}):(\d{2})(?::\d{2})?$/.exec(raw);
+    if (hhmm) {
+      const h = Number(hhmm[1]);
+      const m = Number(hhmm[2]);
+      if (h <= 23 && m <= 59) {
+        return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+      }
+    }
+    const parsed = new Date(raw);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed.toLocaleTimeString('en-US', {
+        hour: '2-digit', minute: '2-digit', hour12: false,
+      });
+    }
+  }
+  return new Date().toLocaleTimeString('en-US', {
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+}
+
 // Save form data directly to the backend DB
 function saveFormToDb(item: ScheduleItem, data: Record<string, string>, visitId: string): void {
   const base = `${API_BASE}/api/visits/${visitId}`;
@@ -400,6 +434,7 @@ function saveFormToDb(item: ScheduleItem, data: Record<string, string>, visitId:
     if (data.weight_lbs) body.weight_lbs = Number(data.weight_lbs);
     if (data.pain_score) body.pain_score = Number(data.pain_score);
     if (data.notes) body.notes = data.notes;
+    if (data.occurred_at) body.occurred_at = data.occurred_at;
     fetch(`${base}/vitals`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -418,6 +453,10 @@ function saveFormToDb(item: ScheduleItem, data: Record<string, string>, visitId:
     if (data.route) body.route = data.route;
     if (data.reason) body.reason_withheld = data.reason;
     if (data.notes) body.dose = (body.dose ?? '') + (data.notes ? ` (${data.notes})` : '');
+    // Administered time only applies when the dose was actually given. The
+    // form requires it; backend tolerates HH:MM or ISO and stores it
+    // explicitly instead of falling back to now().
+    if (given && data.administered_at) body.administered_at = data.administered_at;
     fetch(`${base}/medications`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -434,6 +473,7 @@ function saveFormToDb(item: ScheduleItem, data: Record<string, string>, visitId:
       if (data.outcome) body.outcome = data.outcome;
       if (data.notes) body.description = data.notes;
       if (data.reason) body.description = data.reason;
+      if (data.occurred_at) body.occurred_at = data.occurred_at;
       fetch(`${base}/interventions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -471,6 +511,7 @@ function buildChatMessage(item: ScheduleItem, data: Record<string, string>): str
     if (data.weight_lbs) parts.push(`Weight ${data.weight_lbs} lbs`);
     if (data.pain_score) parts.push(`Pain ${data.pain_score}/10`);
     let msg = `Vitals recorded: ${parts.join(', ')}`;
+    if (data.occurred_at) msg += ` (taken at ${data.occurred_at})`;
     if (data.notes) msg += `. Notes: ${data.notes}`;
     return msg;
   }
@@ -481,6 +522,7 @@ function buildChatMessage(item: ScheduleItem, data: Record<string, string>): str
 
   if (action === 'med_given') {
     let msg = `${item.label} — given`;
+    if (data.administered_at) msg += ` at ${data.administered_at}`;
     if (data.notes) msg += `. ${data.notes}`;
     return msg;
   }
@@ -495,6 +537,7 @@ function buildChatMessage(item: ScheduleItem, data: Record<string, string>): str
 
   if (action === 'intervention_done') {
     let msg = `${item.label} — completed`;
+    if (data.occurred_at) msg += ` at ${data.occurred_at}`;
     if (data.outcome) msg += `. Outcome: ${data.outcome}`;
     if (data.notes) msg += `. ${data.notes}`;
     return msg;

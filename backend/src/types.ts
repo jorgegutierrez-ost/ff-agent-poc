@@ -40,6 +40,7 @@ export interface VitalSigns {
   weight_lbs?: number;
   pain_score?: number;
   notes?: string;
+  occurred_at: string | null;
   recorded_at: string;
 }
 
@@ -49,6 +50,7 @@ export interface Intervention {
   name: string;
   description?: string;
   outcome?: string;
+  occurred_at: string | null;
   recorded_at: string;
 }
 
@@ -60,6 +62,7 @@ export interface Medication {
   route?: string;
   given: boolean;
   reason_withheld?: string;
+  administered_at: string | null;
   recorded_at: string;
 }
 
