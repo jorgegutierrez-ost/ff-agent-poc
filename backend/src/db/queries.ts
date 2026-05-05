@@ -2,6 +2,7 @@ import { pool } from './pool';
 import type {
   Patient, Visit, VitalSigns, Intervention,
   Medication, Narrative, ConversationMessage,
+  SuctionEvent, SuctionRoute,
 } from '../types';
 
 // ─── Patients ────────────────────────────────────────────────
@@ -254,6 +255,60 @@ function parseTimeInput(value: unknown): Date | null {
 export async function getMedications(visitId: string): Promise<Medication[]> {
   const { rows } = await pool.query(
     `SELECT * FROM medications WHERE visit_id = $1 ORDER BY recorded_at`,
+    [visitId],
+  );
+  return rows;
+}
+
+// ─── Suction Events ──────────────────────────────────────────
+
+const VALID_SUCTION_ROUTES: readonly SuctionRoute[] = ['nasal', 'oral', 'trach'];
+
+export async function saveSuctionEvent(
+  visitId: string,
+  data: Record<string, unknown>,
+): Promise<SuctionEvent> {
+  const route = String(data.route ?? '').toLowerCase().trim() as SuctionRoute;
+  if (!VALID_SUCTION_ROUTES.includes(route)) {
+    throw new Error(
+      `Invalid suction route "${data.route}". Must be one of: ${VALID_SUCTION_ROUTES.join(', ')}`,
+    );
+  }
+
+  // Same explicit-time contract as medications/vitals/interventions —
+  // never auto-stamp. Suctioning is high-frequency and nurses often
+  // batch-document, so the event time matters more here than most.
+  const occurred = parseTimeInput(data.occurred_at);
+  if (!occurred) {
+    throw new Error('occurred_at is required for suction events');
+  }
+
+  // Coerce count; reject non-positive integers via the DB CHECK constraint.
+  const rawCount = data.count;
+  const count = typeof rawCount === 'number' ? Math.floor(rawCount) : 1;
+
+  const { rows } = await pool.query(
+    `INSERT INTO suction_events (
+       visit_id, occurred_at, route, amount, color, consistency, count, notes
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING *`,
+    [
+      visitId,
+      occurred,
+      route,
+      data.amount ?? null,
+      data.color ?? null,
+      data.consistency ?? null,
+      count,
+      data.notes ?? null,
+    ],
+  );
+  return rows[0];
+}
+
+export async function getSuctionEvents(visitId: string): Promise<SuctionEvent[]> {
+  const { rows } = await pool.query(
+    `SELECT * FROM suction_events WHERE visit_id = $1 ORDER BY occurred_at`,
     [visitId],
   );
   return rows;

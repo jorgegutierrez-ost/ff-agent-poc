@@ -7,6 +7,7 @@ import {
   InterventionForm,
   NarrativeForm,
   SkipForm,
+  SuctionForm,
 } from './ActionForms';
 import { useAudioRecorder, formatDuration } from '../hooks/useAudioRecorder';
 import { useAudioPlayer } from '../hooks/useAudioPlayer';
@@ -137,6 +138,15 @@ export default function ChatPanel({
         <InterventionForm
           item={item}
           action={actionValue as 'intervention_done' | 'intervention_skip'}
+          onSubmit={onFormSubmit}
+          onCancel={onFormCancel}
+        />
+      );
+    }
+    if (actionValue === 'log_suction') {
+      return (
+        <SuctionForm
+          item={item}
           onSubmit={onFormSubmit}
           onCancel={onFormCancel}
         />

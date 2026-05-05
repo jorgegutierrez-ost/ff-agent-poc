@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { Patient, Visit } from '../types';
 import { API_BASE } from './../config';
 import { fuzzyMatch } from '../lib/medicationMatch';
+import { CARE_NOTES } from '../lib/careNotes';
 
 interface PatientDetailSidebarProps {
   patient: Patient;
@@ -115,16 +116,6 @@ function to12h(time: string): string {
 function timeRange(start: string, end: string): string {
   return `${to12h(start)} – ${to12h(end)}`;
 }
-
-// Per-patient care notes (POC: hardcoded)
-const CARE_NOTES: Record<string, string> = {
-  '10000000-0000-0000-0000-000000000001':
-    'Infant on private duty nursing. Watch trach site for redness or secretions. Feeds via G-tube every 3 hours. Mother is primary caregiver and should be updated after each intervention.',
-  '10000000-0000-0000-0000-000000000002':
-    'Patient prefers morning medications with breakfast. Check blood pressure before administering Metoprolol. Monitor for signs of hypoglycemia and edema.',
-  '10000000-0000-0000-0000-000000000003':
-    'Patient requires full assist for mobility and transfers. Monitor for seizure activity. Use latex-free gloves only — known latex allergy.',
-};
 
 export default function PatientDetailSidebar({
   patient,

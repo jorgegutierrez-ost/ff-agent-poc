@@ -3,6 +3,7 @@ import {
   saveVitals,
   saveIntervention,
   saveMedication,
+  saveSuctionEvent,
   upsertNarrative,
 } from '../db/queries';
 
@@ -90,6 +91,61 @@ export const TOOL_DEFINITIONS: Tool[] = [
     },
   },
   {
+    name: 'log_suction',
+    description:
+      'Log a suctioning event during the visit. Suctioning happens 1–20+ ' +
+      'times per shift on patients with trachs or heavy secretions, so ' +
+      'the nurse may batch-document multiple similar passes as one entry ' +
+      'using the count field (e.g. "suctioned 5 times this hour, all ' +
+      'clear thin trach" → count: 5). Always capture the actual event ' +
+      'time the nurse reports, not the current time.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        visit_id: { type: 'string' },
+        occurred_at: {
+          type: 'string',
+          description:
+            'Time the suctioning was performed (or the start of a ' +
+            'consolidated window). ISO-8601 or HH:MM (24-hour). Required.',
+        },
+        route: {
+          type: 'string',
+          enum: ['nasal', 'oral', 'trach'],
+          description: 'Where the suction was performed.',
+        },
+        amount: {
+          type: 'string',
+          description:
+            'Amount suctioned. Conventional buckets are "small", ' +
+            '"moderate", "copious", or a measured volume like "5 mL".',
+        },
+        color: {
+          type: 'string',
+          description:
+            'Color of secretions: "clear", "white", "yellow", "green", ' +
+            '"blood-tinged", or free text.',
+        },
+        consistency: {
+          type: 'string',
+          description: 'Consistency: "thin", "thick", or "tenacious".',
+        },
+        count: {
+          type: 'number',
+          description:
+            'How many suction passes this entry represents. Defaults to ' +
+            '1. Use a higher number when the nurse describes a batch ' +
+            '("I suctioned five times").',
+        },
+        notes: {
+          type: 'string',
+          description: 'Free-text observations.',
+        },
+      },
+      required: ['visit_id', 'occurred_at', 'route'],
+    },
+  },
+  {
     name: 'update_narrative',
     description: 'Update the visit narrative with the information collected so far',
     input_schema: {
@@ -123,6 +179,10 @@ export async function executeToolCall(
       }
       case 'log_medication': {
         const row = await saveMedication(visitId, input);
+        return { success: true, id: row.id };
+      }
+      case 'log_suction': {
+        const row = await saveSuctionEvent(visitId, input);
         return { success: true, id: row.id };
       }
       case 'update_narrative': {

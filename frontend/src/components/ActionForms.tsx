@@ -18,6 +18,76 @@ function nowHHMM(): string {
 
 const HHMM_RE = /^([01]?\d|2[0-3]):([0-5]\d)$/;
 
+// Convert HH:MM to a 12-hour display so the reference banner reads
+// the same way the schedule and bedside MAR do.
+function to12h(time: string): string {
+  const [h, m] = time.split(':');
+  const hour = parseInt(h, 10);
+  if (Number.isNaN(hour)) return time;
+  const ampm = hour >= 12 ? 'PM' : 'AM';
+  const display = hour > 12 ? hour - 12 : hour === 0 ? 12 : hour;
+  return `${display}:${m} ${ampm}`;
+}
+
+// Reference banner shown at the top of every confirmation form.
+// Surfaces the scheduled time and (for medications) the same six
+// safety fields the nurse sees on the med card. Per Julie's P0 #3,
+// these must be visible on chat confirmation cards too — not just
+// on the right-panel schedule.
+interface ScheduledHeaderProps {
+  item: ScheduleItem;
+}
+
+function ScheduledHeader({ item }: ScheduledHeaderProps) {
+  const isMed = item.type === 'medication';
+  const doseLine = isMed
+    ? [item.dose, item.concentration, item.route]
+        .filter((p): p is string => Boolean(p))
+        .join(' · ')
+    : '';
+  const indication = isMed ? item.indication : null;
+
+  // PRN orders carry no scheduled time. Show a PRN badge instead so the
+  // nurse never sees a misleading "Scheduled 00:00".
+  const timeBadge = item.isPrn ? (
+    <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-indigo-700">
+      PRN
+    </span>
+  ) : (
+    <span className="text-[11px] font-medium tabular-nums text-gray-500">
+      Scheduled {to12h(item.scheduledTime)}
+    </span>
+  );
+
+  // For PRNs, append max-frequency hint to the existing "For: …" line so
+  // the nurse sees the dosing limit before confirming.
+  const freqHint =
+    item.isPrn && item.maxFrequencyHours
+      ? `max q${item.maxFrequencyHours}h`
+      : '';
+
+  return (
+    <div className="mb-3 rounded-lg border border-gray-100 bg-gray-50 px-3 py-2">
+      <div className="flex items-baseline justify-between gap-3">
+        <span className="text-sm font-semibold text-gray-900">{item.label}</span>
+        {timeBadge}
+      </div>
+      {doseLine && (
+        <p className="mt-0.5 text-xs text-gray-700">{doseLine}</p>
+      )}
+      {(indication || item.sublabel || freqHint) && (
+        <p className="mt-0.5 text-[11px] text-gray-500">
+          {indication ? `For: ${indication}` : ''}
+          {indication && (item.sublabel || freqHint) ? ' · ' : ''}
+          {item.sublabel}
+          {item.sublabel && freqHint ? ' · ' : ''}
+          {freqHint}
+        </p>
+      )}
+    </div>
+  );
+}
+
 interface TimeFieldProps {
   label: string;
   hint: string;
@@ -145,6 +215,8 @@ export function VitalsForm({ item, onSubmit, onCancel }: VitalsFormProps) {
           </svg>
         </button>
       </div>
+
+      <ScheduledHeader item={item} />
 
       {showError && (
         <p className="mb-3 text-xs text-red-500">
@@ -374,7 +446,7 @@ export function MedicationForm({ item, action, onSubmit, onCancel }: MedicationF
       <div className="rounded-xl border border-gray-200 bg-white p-4">
         <div className="mb-3 flex items-center justify-between">
           <h4 className="text-sm font-semibold text-gray-900">
-            Confirm: {item.label}
+            Confirm administration
           </h4>
           <button onClick={onCancel} className="text-gray-400 hover:text-gray-600">
             <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -382,7 +454,8 @@ export function MedicationForm({ item, action, onSubmit, onCancel }: MedicationF
             </svg>
           </button>
         </div>
-        <p className="mb-3 text-xs text-gray-500">{item.sublabel}</p>
+
+        <ScheduledHeader item={item} />
 
         <TimeField
           label="Time administered"
@@ -420,7 +493,7 @@ export function MedicationForm({ item, action, onSubmit, onCancel }: MedicationF
       <div className="rounded-xl border border-gray-200 bg-white p-4">
         <div className="mb-3 flex items-center justify-between">
           <h4 className="text-sm font-semibold text-gray-900">
-            Skip: {item.label}
+            Skip dose
           </h4>
           <button onClick={onCancel} className="text-gray-400 hover:text-gray-600">
             <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -428,6 +501,9 @@ export function MedicationForm({ item, action, onSubmit, onCancel }: MedicationF
             </svg>
           </button>
         </div>
+
+        <ScheduledHeader item={item} />
+
         {showError && (
           <p className="mb-2 text-xs text-red-500">
             Please provide a reason for skipping.
@@ -463,7 +539,7 @@ export function MedicationForm({ item, action, onSubmit, onCancel }: MedicationF
     <div className="rounded-xl border border-gray-200 bg-white p-4">
       <div className="mb-3 flex items-center justify-between">
         <h4 className="text-sm font-semibold text-gray-900">
-          Modify: {item.label}
+          Modify dose
         </h4>
         <button onClick={onCancel} className="text-gray-400 hover:text-gray-600">
           <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -471,6 +547,9 @@ export function MedicationForm({ item, action, onSubmit, onCancel }: MedicationF
           </svg>
         </button>
       </div>
+
+      <ScheduledHeader item={item} />
+
       {showError && (
         <p className="mb-2 text-xs text-red-500">
           Please describe what was modified.
@@ -577,7 +656,7 @@ export function InterventionForm({ item, action, onSubmit, onCancel }: Intervent
       <div className="rounded-xl border border-gray-200 bg-white p-4">
         <div className="mb-3 flex items-center justify-between">
           <h4 className="text-sm font-semibold text-gray-900">
-            Skip: {item.label}
+            Mark not needed
           </h4>
           <button onClick={onCancel} className="text-gray-400 hover:text-gray-600">
             <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -585,6 +664,9 @@ export function InterventionForm({ item, action, onSubmit, onCancel }: Intervent
             </svg>
           </button>
         </div>
+
+        <ScheduledHeader item={item} />
+
         {showError && (
           <p className="mb-2 text-xs text-red-500">
             Please provide a reason.
@@ -620,7 +702,7 @@ export function InterventionForm({ item, action, onSubmit, onCancel }: Intervent
     <div className="rounded-xl border border-gray-200 bg-white p-4">
       <div className="mb-3 flex items-center justify-between">
         <h4 className="text-sm font-semibold text-gray-900">
-          Complete: {item.label}
+          Mark complete
         </h4>
         <button onClick={onCancel} className="text-gray-400 hover:text-gray-600">
           <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -628,7 +710,8 @@ export function InterventionForm({ item, action, onSubmit, onCancel }: Intervent
           </svg>
         </button>
       </div>
-      <p className="mb-3 text-xs text-gray-500">{item.sublabel}</p>
+
+      <ScheduledHeader item={item} />
 
       <TimeField
         label="Time performed"
@@ -792,7 +875,7 @@ export function SkipForm({ item, label, onSubmit, onCancel }: SkipFormProps) {
     <div className="rounded-xl border border-gray-200 bg-white p-4">
       <div className="mb-3 flex items-center justify-between">
         <h4 className="text-sm font-semibold text-gray-900">
-          Skip: {label}
+          Skip {label.toLowerCase()}
         </h4>
         <button onClick={onCancel} className="text-gray-400 hover:text-gray-600">
           <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -800,6 +883,9 @@ export function SkipForm({ item, label, onSubmit, onCancel }: SkipFormProps) {
           </svg>
         </button>
       </div>
+
+      <ScheduledHeader item={item} />
+
       {showError && (
         <p className="mb-2 text-xs text-red-500">Please provide a reason.</p>
       )}
@@ -823,6 +909,232 @@ export function SkipForm({ item, label, onSubmit, onCancel }: SkipFormProps) {
         className="mt-3 w-full rounded-lg bg-gray-900 py-2.5 text-sm font-medium text-white transition-colors hover:bg-gray-800"
       >
         Confirm skipped
+      </button>
+    </div>
+  );
+}
+
+// ─── Suction Form ────────────────────────────────────────────
+//
+// Specialized form for high-frequency tracheal/oral/nasal suctioning.
+// Distinct from InterventionForm because Renee's spec calls for
+// structured fields (route, amount, color, consistency) and a "count"
+// for consolidating a hour's worth of similar passes into one entry.
+
+const SUCTION_ROUTES: Array<{ value: 'nasal' | 'oral' | 'trach'; label: string }> = [
+  { value: 'trach', label: 'Trach' },
+  { value: 'oral',  label: 'Oral' },
+  { value: 'nasal', label: 'Nasal' },
+];
+const AMOUNT_CHIPS = ['Small', 'Moderate', 'Copious'];
+const COLOR_CHIPS = ['Clear', 'White', 'Yellow', 'Green', 'Blood-tinged'];
+const CONSISTENCY_CHIPS = ['Thin', 'Thick', 'Tenacious'];
+
+interface SuctionFormProps {
+  item: ScheduleItem;
+  onSubmit: (item: ScheduleItem, data: Record<string, string>) => void;
+  onCancel: () => void;
+}
+
+function ChipRow({
+  options,
+  value,
+  onSelect,
+}: {
+  options: string[];
+  value: string;
+  onSelect: (next: string) => void;
+}) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {options.map((opt) => {
+        const active = value.toLowerCase() === opt.toLowerCase();
+        return (
+          <button
+            key={opt}
+            type="button"
+            onClick={() => onSelect(active ? '' : opt)}
+            className={`rounded-full border px-2.5 py-1 text-xs font-medium transition-colors ${
+              active
+                ? 'border-gray-900 bg-gray-900 text-white'
+                : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-50'
+            }`}
+          >
+            {opt}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+export function SuctionForm({ item, onSubmit, onCancel }: SuctionFormProps) {
+  const [route, setRoute] = useState<'nasal' | 'oral' | 'trach' | ''>('trach');
+  const [occurredAt, setOccurredAt] = useState<string>(nowHHMM);
+  const [amount, setAmount] = useState('');
+  const [color, setColor] = useState('');
+  const [consistency, setConsistency] = useState('');
+  const [count, setCount] = useState(1);
+  const [notes, setNotes] = useState('');
+  const [routeError, setRouteError] = useState<string | null>(null);
+  const [timeError, setTimeError] = useState<string | null>(null);
+
+  const handleSubmit = () => {
+    if (!route) {
+      setRouteError('Pick a route.');
+      return;
+    }
+    if (!HHMM_RE.test(occurredAt.trim())) {
+      setTimeError('Enter the time you suctioned (HH:MM, 24-hour).');
+      return;
+    }
+    onSubmit(item, {
+      action: 'suction_logged',
+      route,
+      occurred_at: occurredAt.trim(),
+      amount,
+      color,
+      consistency,
+      count: String(count),
+      notes,
+    });
+  };
+
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <h4 className="text-sm font-semibold text-gray-900">Log suction</h4>
+        <button onClick={onCancel} className="text-gray-400 hover:text-gray-600">
+          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+
+      <ScheduledHeader item={item} />
+
+      <TimeField
+        label="Time suctioned"
+        hint="Use the time of the first pass if you're consolidating a window."
+        value={occurredAt}
+        onChange={setOccurredAt}
+        error={timeError}
+        onClearError={() => timeError && setTimeError(null)}
+      />
+
+      {/* Route — required, segmented buttons */}
+      <div className="mb-3">
+        <label className="mb-1 block text-[11px] font-medium text-gray-500 uppercase">
+          Route <span className="text-red-500">*</span>
+        </label>
+        <div className="flex gap-1.5">
+          {SUCTION_ROUTES.map((r) => {
+            const active = route === r.value;
+            return (
+              <button
+                key={r.value}
+                type="button"
+                onClick={() => {
+                  setRoute(r.value);
+                  if (routeError) setRouteError(null);
+                }}
+                className={`flex-1 rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
+                  active
+                    ? 'border-gray-900 bg-gray-900 text-white'
+                    : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-50'
+                }`}
+              >
+                {r.label}
+              </button>
+            );
+          })}
+        </div>
+        {routeError && (
+          <p className="mt-1 text-xs text-red-500">{routeError}</p>
+        )}
+      </div>
+
+      {/* Amount */}
+      <div className="mb-3">
+        <label className="mb-1 block text-[11px] font-medium text-gray-500 uppercase">
+          Amount
+        </label>
+        <ChipRow options={AMOUNT_CHIPS} value={amount} onSelect={setAmount} />
+        <input
+          type="text"
+          value={amount}
+          onChange={(e) => setAmount(e.target.value)}
+          placeholder="Or enter measured volume (e.g. 5 mL)"
+          className="mt-2 w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900 placeholder-gray-300 outline-none focus:border-gray-300 focus:bg-white"
+        />
+      </div>
+
+      {/* Color */}
+      <div className="mb-3">
+        <label className="mb-1 block text-[11px] font-medium text-gray-500 uppercase">
+          Color
+        </label>
+        <ChipRow options={COLOR_CHIPS} value={color} onSelect={setColor} />
+      </div>
+
+      {/* Consistency */}
+      <div className="mb-3">
+        <label className="mb-1 block text-[11px] font-medium text-gray-500 uppercase">
+          Consistency
+        </label>
+        <ChipRow options={CONSISTENCY_CHIPS} value={consistency} onSelect={setConsistency} />
+      </div>
+
+      {/* Count — for consolidating multiple passes per Renee's spec */}
+      <div className="mb-3">
+        <label className="mb-1 block text-[11px] font-medium text-gray-500 uppercase">
+          Number of passes
+        </label>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setCount((c) => Math.max(1, c - 1))}
+            className="flex h-9 w-9 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+            aria-label="Decrease count"
+          >
+            −
+          </button>
+          <span className="min-w-[2ch] text-center text-base font-semibold tabular-nums text-gray-900">
+            {count}
+          </span>
+          <button
+            type="button"
+            onClick={() => setCount((c) => Math.min(30, c + 1))}
+            className="flex h-9 w-9 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+            aria-label="Increase count"
+          >
+            +
+          </button>
+          <span className="text-[11px] text-gray-400">
+            Use this to consolidate multiple passes ("5 times this hour").
+          </span>
+        </div>
+      </div>
+
+      {/* Notes */}
+      <div className="mb-1">
+        <label className="mb-1 block text-[11px] font-medium text-gray-500 uppercase">
+          Notes <span className="font-normal text-gray-400">(optional)</span>
+        </label>
+        <input
+          type="text"
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="e.g. tolerated well, no desat"
+          className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900 placeholder-gray-300 outline-none focus:border-gray-300 focus:bg-white"
+        />
+      </div>
+
+      <button
+        onClick={handleSubmit}
+        className="mt-3 w-full rounded-lg bg-gray-900 py-2.5 text-sm font-medium text-white transition-colors hover:bg-gray-800"
+      >
+        Log {count > 1 ? `${count} passes` : 'pass'}
       </button>
     </div>
   );

@@ -369,5 +369,47 @@ export async function seed(): Promise<void> {
     );
   }
 
+  // ── Suction events for today's Carlos visit ────────────────────────
+  // Two historical entries earlier in the shift so the in-visit Suction
+  // Log isn't empty during demos. Only seeded if Carlos's visit exists
+  // and has no events yet (idempotent re-runs).
+  const carlosVisitId = '20000000-0000-0000-0000-000000000001';
+  const { rows: existing } = await pool.query(
+    `SELECT 1 FROM suction_events WHERE visit_id = $1 LIMIT 1`,
+    [carlosVisitId],
+  );
+  if (existing.length === 0) {
+    // Anchor event times to today so the demo always shows current data.
+    const today = todayString();
+    const events = [
+      {
+        occurred_at: `${today}T07:30:00`,
+        route: 'trach',
+        amount: 'moderate',
+        color: 'white',
+        consistency: 'thick',
+        count: 1,
+        notes: 'Pre-shift baseline; tolerated well.',
+      },
+      {
+        occurred_at: `${today}T08:05:00`,
+        route: 'trach',
+        amount: 'small',
+        color: 'clear',
+        consistency: 'thin',
+        count: 2,
+        notes: 'After morning nebulizer; two passes.',
+      },
+    ];
+    for (const e of events) {
+      await pool.query(
+        `INSERT INTO suction_events (
+           visit_id, occurred_at, route, amount, color, consistency, count, notes
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [carlosVisitId, e.occurred_at, e.route, e.amount, e.color, e.consistency, e.count, e.notes],
+      );
+    }
+  }
+
   console.log('[seed] Database seeded successfully');
 }

@@ -12,6 +12,8 @@ import {
   saveVitals,
   saveIntervention,
   saveMedication,
+  saveSuctionEvent,
+  getSuctionEvents,
   upsertNarrative,
   getScheduledTasks,
 } from '../db/queries';
@@ -33,14 +35,22 @@ router.get('/', async (_req, res) => {
 router.get('/:visitId/summary', async (req, res) => {
   try {
     const { visitId } = req.params;
-    const [vitals, allVitals, interventions, medications, narrative] = await Promise.all([
+    const [vitals, allVitals, interventions, medications, narrative, suctionEvents] = await Promise.all([
       getVitals(visitId),
       getAllVitals(visitId),
       getInterventions(visitId),
       getMedications(visitId),
       getNarrative(visitId),
+      getSuctionEvents(visitId),
     ]);
-    res.json({ vitals, all_vitals: allVitals, interventions, medications, narrative });
+    res.json({
+      vitals,
+      all_vitals: allVitals,
+      interventions,
+      medications,
+      narrative,
+      suction_events: suctionEvents,
+    });
   } catch (err) {
     console.error('[visits/summary] Error:', err);
     res.status(500).json({ error: 'Failed to fetch visit summary' });
@@ -107,6 +117,19 @@ router.post('/:visitId/interventions', async (req, res) => {
   } catch (err) {
     console.error('[visits/interventions] Error:', err);
     res.status(500).json({ error: 'Failed to save intervention' });
+  }
+});
+
+router.post('/:visitId/suction-events', async (req, res) => {
+  try {
+    const row = await saveSuctionEvent(req.params.visitId, req.body);
+    res.json(row);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to save suction event';
+    console.error('[visits/suction-events] Error:', msg);
+    // 400 for validation failures (route enum, missing time), 500 otherwise.
+    const isValidation = /Invalid suction route|occurred_at is required/.test(msg);
+    res.status(isValidation ? 400 : 500).json({ error: msg });
   }
 });
 

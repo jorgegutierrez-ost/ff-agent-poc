@@ -72,6 +72,21 @@ export interface NarrativeData {
   patient_tolerated_notes?: string;
 }
 
+export type SuctionRoute = 'nasal' | 'oral' | 'trach';
+
+export interface SuctionEvent {
+  id: string;
+  visit_id: string;
+  occurred_at: string;
+  route: SuctionRoute;
+  amount: string | null;
+  color: string | null;
+  consistency: string | null;
+  count: number;
+  notes: string | null;
+  recorded_at: string;
+}
+
 export interface VisitSummaryData {
   vitals: VitalsData | null;
   interventions: InterventionData[];
@@ -88,12 +103,26 @@ export interface ScheduleItem {
   type: ScheduleItemType;
   status: ScheduleItemStatus;
   scheduledTime: string; // HH:MM
-  label: string;         // e.g. "Metoprolol 25mg"
-  sublabel: string;      // e.g. "Oral · Twice daily"
+  label: string;         // drug name only — e.g. "Ranitidine"
+  sublabel: string;      // frequency — e.g. "Twice daily"
   lateMinutes?: number;  // if overdue, how many minutes late
   quickActions: QuickAction[];
   completedAt?: string;  // HH:MM when completed
   completedAction?: string; // "given" | "skipped" | "modified" | "recorded" | "done"
+  // Medication-only structured fields. Surface the same six safety fields
+  // the in-visit confirmation card needs to display without a tap.
+  dose?: string | null;
+  concentration?: string | null;
+  route?: string | null;
+  indication?: string | null;
+  instructions?: string | null;
+  // True when this item was synthesized from a PRN order (not a real
+  // scheduled task). Tells the confirmation header to render "PRN order"
+  // instead of "Scheduled HH:MM" since PRNs have no scheduled time.
+  isPrn?: boolean;
+  // Optional max-frequency hint for PRN orders ("max q4h") — surfaced in
+  // the confirmation header alongside the indication.
+  maxFrequencyHours?: number | null;
 }
 
 export interface QuickAction {

@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
-import type { Patient, Visit, ChatMessage, ScheduleItem } from '../types';
+import type { Patient, Visit, ChatMessage, ScheduleItem, SuctionEvent } from '../types';
 import type { ActiveForm } from './ChatPanel';
 import { API_BASE } from '../config';
 import { fuzzyMatch } from '../lib/medicationMatch';
@@ -27,6 +27,29 @@ function getInitials(name: string): string {
     .slice(0, 2);
 }
 
+// Shape of a PRN order as the backend returns it. Mirrored from
+// patient_prn_orders so the in-visit sidebar can list them mid-visit.
+export interface PrnOrder {
+  id: string;
+  medication: string;
+  dose: string;
+  route: string;
+  indication: string;
+  max_frequency_hours: number | null;
+  notes: string | null;
+}
+
+// Shape of a logged medication used by the in-visit panel to compute
+// "PRNs given so far this shift" without re-fetching.
+export interface LoggedMed {
+  id?: string;
+  name: string;
+  given: boolean;
+  reason_withheld?: string;
+  administered_at?: string | null;
+  recorded_at: string;
+}
+
 export default function VisitPage({
   patient,
   visit,
@@ -40,6 +63,9 @@ export default function VisitPage({
 }: VisitPageProps) {
   const [scheduleItems, setScheduleItems] = useState<ScheduleItem[]>([],
   );
+  const [prnOrders, setPrnOrders] = useState<PrnOrder[]>([]);
+  const [loggedMeds, setLoggedMeds] = useState<LoggedMed[]>([]);
+  const [suctionEvents, setSuctionEvents] = useState<SuctionEvent[]>([]);
   const [activeForm, setActiveForm] = useState<ActiveForm | null>(null);
 
   // Load scheduled tasks AND already-logged events, then mark scheduled
@@ -52,19 +78,52 @@ export default function VisitPage({
       fetch(`${API_BASE}/api/visits/${visit.id}/summary`).then((r) =>
         r.ok ? r.json() : { vitals: null, interventions: [], medications: [], narrative: null },
       ),
+      fetch(`${API_BASE}/api/patients/${patient.id}/prn-orders`).then((r) =>
+        r.ok ? r.json() : [],
+      ),
     ])
       .then(
-        ([tasks, summary]: [
-          Array<{ id: string; type: string; label: string; sublabel: string | null; scheduled_time: string }>,
+        ([tasks, summary, prn]: [
+          Array<{
+            id: string;
+            type: string;
+            label: string;
+            sublabel: string | null;
+            scheduled_time: string;
+            dose?: string | null;
+            concentration?: string | null;
+            route?: string | null;
+            indication?: string | null;
+            instructions?: string | null;
+          }>,
           {
             vitals: { recorded_at?: string } | null;
             all_vitals?: Array<{ recorded_at: string }>;
             interventions: Array<{ name: string; recorded_at: string }>;
-            medications: Array<{ name: string; given: boolean; reason_withheld?: string; recorded_at: string }>;
+            medications: Array<{ name: string; given: boolean; reason_withheld?: string; administered_at?: string | null; recorded_at: string }>;
             narrative: { updated_at?: string } | null;
+            suction_events?: SuctionEvent[];
           },
+          PrnOrder[],
         ]) => {
-          const quickActionsForType = (type: string): ScheduleItem['quickActions'] => {
+          setPrnOrders(prn);
+          setLoggedMeds((summary.medications ?? []) as LoggedMed[]);
+          setSuctionEvents(summary.suction_events ?? []);
+          const isSuctionLabel = (label: string) => /suction/i.test(label);
+
+          const quickActionsForTask = (
+            type: string,
+            label: string,
+          ): ScheduleItem['quickActions'] => {
+            // Suctioning is structurally an intervention but has its own
+            // form (route, amount, color, consistency, count). Detect by
+            // label so a single override covers nasal/oral/trach variants.
+            if (type === 'intervention' && isSuctionLabel(label)) {
+              return [
+                { label: 'Log suction', value: 'log_suction', variant: 'primary' },
+                { label: 'Not needed', value: 'intervention_skip', variant: 'secondary' },
+              ];
+            }
             switch (type) {
               case 'vitals':
                 return [
@@ -163,9 +222,14 @@ export default function VisitPage({
               label: t.label,
               sublabel: t.sublabel ?? '',
               lateMinutes,
-              quickActions: quickActionsForType(t.type),
+              quickActions: quickActionsForTask(t.type, t.label),
               completedAt,
               completedAction,
+              dose: t.dose ?? null,
+              concentration: t.concentration ?? null,
+              route: t.route ?? null,
+              indication: t.indication ?? null,
+              instructions: t.instructions ?? null,
             };
           });
 
@@ -173,7 +237,7 @@ export default function VisitPage({
         },
       )
       .catch(() => {});
-  }, [visit.id]);
+  }, [visit.id, patient.id]);
 
   const totalItems = scheduleItems.length;
   const completedCount = scheduleItems.filter(
@@ -280,22 +344,51 @@ export default function VisitPage({
       // Save directly to DB (don't rely on agent calling the tool)
       saveFormToDb(item, data, visit.id);
 
+      // Suction is high-frequency: keep the schedule item available for
+      // re-submission instead of marking it completed after one entry.
+      // We bump a counter on the item itself so the card can show
+      // "3 logged" rather than a green check.
+      const isSuction = action === 'suction_logged';
+
       setScheduleItems((prev) =>
         prev.map((si) =>
           si.id === item.id
-            ? {
-                ...si,
-                status: newStatus,
-                completedAt: new Date().toLocaleTimeString('en-US', {
-                  hour: '2-digit',
-                  minute: '2-digit',
-                  hour12: false,
-                }),
-                completedAction,
-              }
+            ? isSuction
+              ? {
+                  ...si,
+                  // Stay pending so the quick action remains; the badge
+                  // count is computed downstream from suctionEvents.
+                  status: 'pending',
+                }
+              : {
+                  ...si,
+                  status: newStatus,
+                  completedAt: new Date().toLocaleTimeString('en-US', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    hour12: false,
+                  }),
+                  completedAction,
+                }
             : si,
         ),
       );
+
+      // After any save, refresh the per-visit summary so dependent UI
+      // (PRN "last given today" hint, suction-log entries, completed
+      // counts) reflects the new state without waiting for the chat
+      // round-trip. Without this the PRN tab silently shows stale data.
+      const isMedAction = action === 'med_given' || action === 'med_modified';
+      if (isSuction || isMedAction) {
+        fetch(`${API_BASE}/api/visits/${visit.id}/summary`)
+          .then((r) => (r.ok ? r.json() : null))
+          .then((s) => {
+            if (!s) return;
+            if (s.suction_events) setSuctionEvents(s.suction_events);
+            if (s.medications) setLoggedMeds(s.medications);
+          })
+          .catch(() => {});
+      }
 
       const chatMsg = buildChatMessage(item, data);
       onSendMessage(chatMsg);
@@ -380,7 +473,14 @@ export default function VisitPage({
           onFormSubmit={handleFormSubmit}
           onFormCancel={handleFormCancel}
         />
-        <VisitSchedule items={scheduleItems} onQuickAction={handleQuickAction} />
+        <VisitSchedule
+          patient={patient}
+          items={scheduleItems}
+          prnOrders={prnOrders}
+          loggedMeds={loggedMeds}
+          suctionEvents={suctionEvents}
+          onQuickAction={handleQuickAction}
+        />
       </div>
     </div>
   );
@@ -445,12 +545,18 @@ function saveFormToDb(item: ScheduleItem, data: Record<string, string>, visitId:
   if (item.type === 'medication') {
     const action = data.action ?? '';
     const given = action !== 'med_skipped';
+    // Prefer form-supplied values (med_modified) but fall back to the
+    // structured fields on the item itself (med_given for both scheduled
+    // meds AND PRN orders synthesized in the in-visit PRN tab). Without
+    // this fallback PRN logs would POST a med with no dose/route.
     const body: Record<string, unknown> = {
       name: item.label,
       given,
     };
-    if (data.dose) body.dose = data.dose;
-    if (data.route) body.route = data.route;
+    const dose = data.dose || item.dose;
+    const route = data.route || item.route;
+    if (dose) body.dose = dose;
+    if (route) body.route = route;
     if (data.reason) body.reason_withheld = data.reason;
     if (data.notes) body.dose = (body.dose ?? '') + (data.notes ? ` (${data.notes})` : '');
     // Administered time only applies when the dose was actually given. The
@@ -466,7 +572,23 @@ function saveFormToDb(item: ScheduleItem, data: Record<string, string>, visitId:
 
   if (item.type === 'intervention') {
     const action = data.action ?? '';
-    if (action !== 'intervention_skip') {
+    // Suction events go to a different table and route — handled below.
+    if (action === 'suction_logged') {
+      const body: Record<string, unknown> = {
+        route: data.route,
+        occurred_at: data.occurred_at,
+        count: data.count ? Number(data.count) : 1,
+      };
+      if (data.amount) body.amount = data.amount;
+      if (data.color) body.color = data.color;
+      if (data.consistency) body.consistency = data.consistency;
+      if (data.notes) body.notes = data.notes;
+      fetch(`${base}/suction-events`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }).catch((e) => console.error('[save suction]', e));
+    } else if (action !== 'intervention_skip') {
       const body: Record<string, unknown> = {
         name: item.label,
       };
@@ -479,6 +601,10 @@ function saveFormToDb(item: ScheduleItem, data: Record<string, string>, visitId:
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       }).catch((e) => console.error('[save intervention]', e));
+    } else {
+      // intervention_skip — no DB write today (skipped is UI-only state
+      // for non-suction interventions). Left explicit for future
+      // reasons-for-skipping audit trails.
     }
   }
 
@@ -539,6 +665,17 @@ function buildChatMessage(item: ScheduleItem, data: Record<string, string>): str
     let msg = `${item.label} — completed`;
     if (data.occurred_at) msg += ` at ${data.occurred_at}`;
     if (data.outcome) msg += `. Outcome: ${data.outcome}`;
+    if (data.notes) msg += `. ${data.notes}`;
+    return msg;
+  }
+
+  if (action === 'suction_logged') {
+    const count = data.count && Number(data.count) > 1 ? `${data.count} passes` : '1 pass';
+    const parts: string[] = [count, `${data.route} suction`];
+    if (data.amount) parts.push(`amount: ${data.amount.toLowerCase()}`);
+    if (data.color) parts.push(`color: ${data.color.toLowerCase()}`);
+    if (data.consistency) parts.push(`consistency: ${data.consistency.toLowerCase()}`);
+    let msg = `Suction logged at ${data.occurred_at}: ${parts.join(', ')}`;
     if (data.notes) msg += `. ${data.notes}`;
     return msg;
   }

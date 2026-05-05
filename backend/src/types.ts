@@ -66,6 +66,21 @@ export interface Medication {
   recorded_at: string;
 }
 
+export type SuctionRoute = 'nasal' | 'oral' | 'trach';
+
+export interface SuctionEvent {
+  id: string;
+  visit_id: string;
+  occurred_at: string;
+  route: SuctionRoute;
+  amount: string | null;
+  color: string | null;
+  consistency: string | null;
+  count: number;
+  notes: string | null;
+  recorded_at: string;
+}
+
 export interface Narrative {
   id: string;
   visit_id: string;

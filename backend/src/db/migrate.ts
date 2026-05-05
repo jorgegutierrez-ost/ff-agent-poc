@@ -130,6 +130,23 @@ CREATE INDEX IF NOT EXISTS idx_patient_prn_orders_patient
   ON patient_prn_orders(patient_id)
   WHERE active = true;
 
+-- Suction events live in their own table because suctioning is high-frequency
+-- (Renee: 1–20+ per shift), so we want structured per-event rows that can be
+-- queried, summarized, and consolidated. The 'count' column lets the nurse
+-- log a hour's worth of similar events as one row.
+CREATE TABLE IF NOT EXISTS suction_events (
+  id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  visit_id      UUID NOT NULL REFERENCES visits(id),
+  occurred_at   TIMESTAMPTZ NOT NULL,
+  route         TEXT NOT NULL CHECK (route IN ('nasal','oral','trach')),
+  amount        TEXT,
+  color         TEXT,
+  consistency   TEXT,
+  count         INTEGER NOT NULL DEFAULT 1 CHECK (count > 0),
+  notes         TEXT,
+  recorded_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS conversation_messages (
   id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   visit_id    UUID NOT NULL REFERENCES visits(id),
@@ -147,6 +164,7 @@ CREATE INDEX IF NOT EXISTS idx_vital_signs_visit ON vital_signs(visit_id);
 CREATE INDEX IF NOT EXISTS idx_interventions_visit ON interventions(visit_id);
 CREATE INDEX IF NOT EXISTS idx_medications_visit ON medications(visit_id);
 CREATE INDEX IF NOT EXISTS idx_visits_nurse_date ON visits(nurse_id, visit_date);
+CREATE INDEX IF NOT EXISTS idx_suction_events_visit ON suction_events(visit_id, occurred_at);
 
 -- Idempotent column additions for live envs where the table already exists.
 -- Safe to re-run; ADD COLUMN IF NOT EXISTS is a no-op when the column is present.
