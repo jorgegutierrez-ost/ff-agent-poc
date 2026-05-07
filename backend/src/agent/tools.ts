@@ -5,6 +5,7 @@ import {
   saveMedication,
   saveSuctionEvent,
   upsertNarrative,
+  searchPatientHistory,
 } from '../db/queries';
 
 export const TOOL_DEFINITIONS: Tool[] = [
@@ -146,6 +147,58 @@ export const TOOL_DEFINITIONS: Tool[] = [
     },
   },
   {
+    name: 'search_patient_history',
+    description:
+      "Search this patient's past completed visits when the nurse asks " +
+      "about prior shifts (when something last happened, how often a med " +
+      "was given, what was noted last visit, etc.). Returns deterministic " +
+      "rows pulled from the chart — quote the dates and excerpts " +
+      "verbatim in your reply, never paraphrase clinical detail and " +
+      "never invent doses or events. " +
+      "Pass at least one filter (query OR medication_name) to keep results " +
+      "focused on what was asked. Without filters this returns the most " +
+      "recent shifts, which is rarely what the nurse wants.",
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        patient_id: {
+          type: 'string',
+          description:
+            'The patient whose history to search. Provided in the patient ' +
+            'block at the top of the conversation context.',
+        },
+        query: {
+          type: 'string',
+          description:
+            'Free-text keyword matched against past narratives ' +
+            '(case-insensitive substring). Use the clinical term the ' +
+            'nurse used: "seizure", "fever", "desat", "wheez", ' +
+            '"breakthrough", etc. Omit if the nurse asked about a ' +
+            'medication specifically.',
+        },
+        medication_name: {
+          type: 'string',
+          description:
+            'Filter to visits where this medication was given (substring, ' +
+            'case-insensitive). Use when the nurse asks about a specific ' +
+            'drug — e.g. "How many PRN albuterols?" → "Albuterol".',
+        },
+        days_back: {
+          type: 'number',
+          description:
+            'How far back to look. Default 14, max 90. Widen only when ' +
+            'the nurse asks about a longer window ("this month", "last ' +
+            'few weeks").',
+        },
+        limit: {
+          type: 'number',
+          description: 'Max visits to return. Default 5, max 20.',
+        },
+      },
+      required: ['patient_id'],
+    },
+  },
+  {
     name: 'update_narrative',
     description: 'Update the visit narrative with the information collected so far',
     input_schema: {
@@ -164,6 +217,7 @@ export const TOOL_DEFINITIONS: Tool[] = [
 export async function executeToolCall(
   toolName: string,
   input: Record<string, unknown>,
+  context: { visitId?: string } = {},
 ): Promise<{ success: boolean; id?: string; error?: string; data?: unknown }> {
   try {
     const visitId = input.visit_id as string;
@@ -193,6 +247,30 @@ export async function executeToolCall(
           input.patient_tolerated_notes as string | undefined,
         );
         return { success: true, id: row.id };
+      }
+      case 'search_patient_history': {
+        const patientId = input.patient_id as string;
+        if (!patientId) return { success: false, error: 'patient_id is required' };
+        const visits = await searchPatientHistory(patientId, {
+          query:          input.query           as string | undefined,
+          medicationName: input.medication_name as string | undefined,
+          daysBack:       input.days_back       as number | undefined,
+          limit:          input.limit           as number | undefined,
+          excludeVisitId: context.visitId,
+        });
+        return {
+          success: true,
+          data: {
+            patient_id: patientId,
+            filters: {
+              query:           input.query           ?? null,
+              medication_name: input.medication_name ?? null,
+              days_back:       input.days_back       ?? 14,
+            },
+            visits_count: visits.length,
+            visits,
+          },
+        };
       }
       default:
         return { success: false, error: `Unknown tool: ${toolName}` };

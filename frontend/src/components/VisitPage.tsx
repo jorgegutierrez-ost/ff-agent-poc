@@ -5,6 +5,7 @@ import { API_BASE } from '../config';
 import { fuzzyMatch } from '../lib/medicationMatch';
 import VisitSchedule from './VisitSchedule';
 import ChatPanel from './ChatPanel';
+import LastShiftHighlights from './LastShiftHighlights';
 
 interface VisitPageProps {
   patient: Patient;
@@ -460,6 +461,12 @@ export default function VisitPage({
           </button>
         </div>
       </div>
+
+      <LastShiftHighlights
+        patientId={patient.id}
+        visitId={visit.id}
+        patientFirstName={patient.full_name.split(' ')[0]}
+      />
 
       {/* ── Body ── */}
       <div className="flex flex-1 overflow-hidden">

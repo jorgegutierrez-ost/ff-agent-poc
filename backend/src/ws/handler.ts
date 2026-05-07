@@ -5,8 +5,10 @@ import {
   saveMessage,
   getScheduledTasks,
   getPrnOrders,
+  getPatientRecentBrief,
 } from '../db/queries';
 import { runAgentLoop } from '../agent/agentLoop';
+import { buildRecapHighlights, renderHighlightsForPrompt } from '../agent/recapHighlights';
 
 // Track active connections per visitId
 const activeConnections = new Map<string, WebSocket>();
@@ -53,12 +55,20 @@ export function handleWebSocket(ws: WebSocket): void {
             return;
           }
 
-          // Load conversation history + care plan
-          const [history, scheduledTasks, prnOrders] = await Promise.all([
+          // Load conversation history + care plan + recent-history brief
+          const [history, scheduledTasks, prnOrders, recentBrief] = await Promise.all([
             getConversationHistory(visitId),
             getScheduledTasks(data.patient.id),
             getPrnOrders(data.patient.id),
+            getPatientRecentBrief(data.patient.id, { excludeVisitId: visitId }),
           ]);
+
+          const highlights = buildRecapHighlights(
+            recentBrief,
+            data.patient,
+            prnOrders.map((o) => o.medication),
+          );
+          const highlightsBlock = renderHighlightsForPrompt(highlights);
 
           // Run agent loop — will stream the opening greeting
           await runAgentLoop(
@@ -69,6 +79,7 @@ export function handleWebSocket(ws: WebSocket): void {
             history,
             scheduledTasks,
             prnOrders,
+            highlightsBlock,
           );
           break;
         }
@@ -93,11 +104,19 @@ export function handleWebSocket(ws: WebSocket): void {
             return;
           }
 
-          const [history, scheduledTasks, prnOrders] = await Promise.all([
+          const [history, scheduledTasks, prnOrders, recentBrief] = await Promise.all([
             getConversationHistory(visitId),
             getScheduledTasks(data.patient.id),
             getPrnOrders(data.patient.id),
+            getPatientRecentBrief(data.patient.id, { excludeVisitId: visitId }),
           ]);
+
+          const highlights = buildRecapHighlights(
+            recentBrief,
+            data.patient,
+            prnOrders.map((o) => o.medication),
+          );
+          const highlightsBlock = renderHighlightsForPrompt(highlights);
 
           // Run agent loop
           await runAgentLoop(
@@ -108,6 +127,7 @@ export function handleWebSocket(ws: WebSocket): void {
             history,
             scheduledTasks,
             prnOrders,
+            highlightsBlock,
           );
           break;
         }

@@ -16,6 +16,7 @@ import {
   getSuctionEvents,
   upsertNarrative,
   getScheduledTasks,
+  searchPastVisits,
 } from '../db/queries';
 
 const HARDCODED_NURSE_ID = '00000000-0000-0000-0000-000000000001';
@@ -29,6 +30,19 @@ router.get('/', async (_req, res) => {
   } catch (err) {
     console.error('[visits] Error:', err);
     res.status(500).json({ error: 'Failed to fetch visits' });
+  }
+});
+
+router.get('/past', async (req, res) => {
+  try {
+    const patientId = typeof req.query.patientId === 'string' ? req.query.patientId : undefined;
+    const q         = typeof req.query.q         === 'string' ? req.query.q         : undefined;
+    const limit     = typeof req.query.limit     === 'string' ? Number(req.query.limit) : undefined;
+    const rows = await searchPastVisits(HARDCODED_NURSE_ID, { patientId, q, limit });
+    res.json(rows);
+  } catch (err) {
+    console.error('[visits/past] Error:', err);
+    res.status(500).json({ error: 'Failed to fetch past visits' });
   }
 });
 

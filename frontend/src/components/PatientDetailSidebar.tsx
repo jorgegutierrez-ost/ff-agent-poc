@@ -126,23 +126,18 @@ export default function PatientDetailSidebar({
 }: PatientDetailSidebarProps) {
   const [tasks, setTasks] = useState<ScheduledTask[]>([]);
   const [loggedMeds, setLoggedMeds] = useState<LoggedMedication[]>([]);
+  const [loggedInterventions, setLoggedInterventions] = useState<
+    Array<{ id: string; name: string; recorded_at: string; occurred_at?: string | null }>
+  >([]);
+  const [hasVitals, setHasVitals] = useState(false);
+  const [hasNarrative, setHasNarrative] = useState(false);
   const [prnOrders, setPrnOrders] = useState<PrnOrder[]>([]);
-  const [medsExpanded, setMedsExpanded] = useState(false);
+  const [tasksExpanded, setTasksExpanded] = useState(true);
   const [prnExpanded, setPrnExpanded] = useState(false);
-  // Per-card expand state for the medication detail panel. Stored as a Set
-  // of scheduled-task IDs so multiple cards can be open at once.
-  const [expandedMedCards, setExpandedMedCards] = useState<Set<string>>(
-    () => new Set(),
-  );
-
-  const toggleMedCard = (id: string) => {
-    setExpandedMedCards((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
+  // Optimistic completion tracking — tap-to-complete adds the task ID
+  // here immediately so the UI reflects the change before the POST resolves.
+  // Reverted on failure.
+  const [localCompleted, setLocalCompleted] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -151,7 +146,7 @@ export default function PatientDetailSidebar({
         r.ok ? r.json() : [],
       ),
       fetch(`${API_BASE}/api/visits/${visit.id}/summary`).then((r) =>
-        r.ok ? r.json() : { medications: [] },
+        r.ok ? r.json() : { medications: [], interventions: [], all_vitals: [], narrative: null },
       ),
       fetch(`${API_BASE}/api/patients/${patient.id}/prn-orders`).then((r) =>
         r.ok ? r.json() : [],
@@ -161,6 +156,9 @@ export default function PatientDetailSidebar({
         if (cancelled) return;
         setTasks(schedule as ScheduledTask[]);
         setLoggedMeds((summary?.medications ?? []) as LoggedMedication[]);
+        setLoggedInterventions(summary?.interventions ?? []);
+        setHasVitals((summary?.all_vitals ?? []).length > 0);
+        setHasNarrative(summary?.narrative != null);
         setPrnOrders(prn as PrnOrder[]);
       })
       .catch(() => {});
@@ -221,11 +219,138 @@ export default function PatientDetailSidebar({
     });
   }, [tasks, loggedMeds]);
 
-  const totalMeds = medications.length;
-  const medsCompleted = medications.filter(
-    (m) => m.status === 'given' || m.status === 'withheld',
-  ).length;
-  const medsPct = totalMeds > 0 ? Math.round((medsCompleted / totalMeds) * 100) : 0;
+  // ── Unified task list (Today's tasks checklist) ─────────────────────
+  type TaskStatus = 'pending' | 'completed' | 'withheld';
+  interface TaskRow {
+    id: string;
+    type: 'medication' | 'intervention' | 'vitals' | 'narrative';
+    time: string;            // HH:MM
+    label: string;
+    sublabel: string;
+    status: TaskStatus;
+    completedAt?: string;    // HH:MM when status === 'completed'
+    reasonWithheld?: string;
+    dose?: string | null;
+    route?: string | null;
+  }
+
+  function formatHHMM(src: string | null | undefined): string | undefined {
+    if (!src) return undefined;
+    const d = new Date(src);
+    if (Number.isNaN(d.getTime())) return undefined;
+    return d.toLocaleTimeString('en-US', {
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    });
+  }
+
+  const taskRows: TaskRow[] = useMemo(() => {
+    const sorted = [...tasks].sort((a, b) => a.scheduled_time.localeCompare(b.scheduled_time));
+    const medPool = [...loggedMeds];
+    const intPool = [...loggedInterventions];
+    let vitalsConsumed = 0;
+    let narrativeConsumed = false;
+    const totalVitalsTasks = sorted.filter((t) => t.type === 'vitals').length;
+    const seededVitals = hasVitals;
+
+    return sorted.map((t) => {
+      let status: TaskStatus = 'pending';
+      let completedAt: string | undefined;
+      let reasonWithheld: string | undefined;
+
+      if (localCompleted.has(t.id)) {
+        status = 'completed';
+        completedAt = new Date().toLocaleTimeString('en-US', {
+          hour: '2-digit', minute: '2-digit', hour12: false,
+        });
+      } else if (t.type === 'medication') {
+        const idx = medPool.findIndex((m) => fuzzyMatch(t.label, m.name));
+        const match = idx >= 0 ? medPool.splice(idx, 1)[0] : null;
+        if (match) {
+          if (match.given) {
+            status = 'completed';
+            completedAt = formatHHMM(match.administered_at ?? match.recorded_at);
+          } else {
+            status = 'withheld';
+            reasonWithheld = match.reason_withheld;
+          }
+        }
+      } else if (t.type === 'intervention') {
+        const idx = intPool.findIndex((i) => fuzzyMatch(t.label, i.name));
+        const match = idx >= 0 ? intPool.splice(idx, 1)[0] : null;
+        if (match) {
+          status = 'completed';
+          completedAt = formatHHMM(match.occurred_at ?? match.recorded_at);
+        }
+      } else if (t.type === 'vitals') {
+        // Fold the count of vitals rows across vitals tasks. If we have
+        // fewer rows than vitals tasks, the earliest tasks are marked
+        // complete first.
+        if (seededVitals && vitalsConsumed < totalVitalsTasks) {
+          status = 'completed';
+          vitalsConsumed += 1;
+        }
+      } else if (t.type === 'narrative') {
+        if (hasNarrative && !narrativeConsumed) {
+          status = 'completed';
+          narrativeConsumed = true;
+        }
+      }
+
+      return {
+        id: t.id,
+        type: t.type,
+        time: t.scheduled_time.slice(0, 5),
+        label: t.label,
+        sublabel: t.sublabel ?? '',
+        status, completedAt, reasonWithheld,
+        dose: t.dose ?? null,
+        route: t.route ?? null,
+      };
+    });
+  }, [tasks, loggedMeds, loggedInterventions, hasVitals, hasNarrative, localCompleted]);
+
+  const totalCount = taskRows.length;
+  const completedCount = taskRows.filter((t) => t.status !== 'pending').length;
+  const completedPct = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
+
+  // Tap handler — meds + interventions write directly via the existing form
+  // endpoints. Vitals + narrative bounce to the live visit because they
+  // require values the dashboard doesn't capture.
+  async function handleTaskTap(t: TaskRow) {
+    if (t.status !== 'pending') return;
+    if (t.type === 'vitals' || t.type === 'narrative') {
+      onBeginVisit(patient.id);
+      return;
+    }
+
+    setLocalCompleted((prev) => {
+      const next = new Set(prev);
+      next.add(t.id);
+      return next;
+    });
+
+    const nowIso = new Date().toISOString();
+    try {
+      const url = t.type === 'medication'
+        ? `${API_BASE}/api/visits/${visit.id}/medications`
+        : `${API_BASE}/api/visits/${visit.id}/interventions`;
+      const body = t.type === 'medication'
+        ? { name: t.label, dose: t.dose, route: t.route, given: true, administered_at: nowIso }
+        : { name: t.label, occurred_at: nowIso };
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) throw new Error('save failed');
+    } catch {
+      setLocalCompleted((prev) => {
+        const next = new Set(prev);
+        next.delete(t.id);
+        return next;
+      });
+    }
+  }
 
   // Overdue = pending meds whose scheduled time is in the past (only while
   // the visit is actively in progress).
@@ -561,32 +686,7 @@ export default function PatientDetailSidebar({
           </div>
         )}
 
-        {/* ── 7. Medications completed ── */}
-        {totalMeds > 0 && (
-          <div className="px-6 pb-4">
-            <div className="rounded-2xl border border-gray-200 bg-white p-4">
-              <div className="flex items-center justify-between">
-                <h3 className="text-[11px] font-semibold tracking-widest text-gray-500 uppercase">
-                  Medications Completed
-                </h3>
-                <span className="text-sm font-semibold text-gray-900 tabular-nums">
-                  {medsCompleted}/{totalMeds}
-                </span>
-              </div>
-              <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-gray-100">
-                <div
-                  className="h-full rounded-full bg-indigo-500 transition-all"
-                  style={{ width: `${medsPct}%` }}
-                />
-              </div>
-              <p className="mt-2 text-right text-xs text-gray-500">
-                {medsPct}% complete
-              </p>
-            </div>
-          </div>
-        )}
-
-        {/* ── 8. Diagnosis ── */}
+        {/* ── 7. Diagnosis ── */}
         <div className="px-6 pb-4">
           <h3 className="mb-1.5 text-[11px] font-semibold tracking-widest text-gray-400 uppercase">
             Diagnosis
@@ -594,169 +694,118 @@ export default function PatientDetailSidebar({
           <p className="text-sm text-gray-900">{patient.primary_diagnosis}</p>
         </div>
 
-        {/* ── 9. All medications (expandable list) ── */}
-        {totalMeds > 0 && (
+        {/* ── 8. Today's tasks (unified checklist with tap-to-complete) ── */}
+        {totalCount > 0 && (
           <div className="px-6 pb-4">
             <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white">
               <button
-                onClick={() => setMedsExpanded((v) => !v)}
+                onClick={() => setTasksExpanded((v) => !v)}
                 className="flex w-full items-center justify-between px-4 py-3 transition-colors hover:bg-gray-50"
-                aria-expanded={medsExpanded}
+                aria-expanded={tasksExpanded}
               >
-                <div className="flex items-center gap-2">
-                  <svg
-                    className="h-4 w-4 text-gray-500"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                    strokeWidth={1.75}
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      d="m13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244"
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-semibold text-gray-900">Today's tasks</span>
+                    <span className="text-sm font-semibold text-gray-900 tabular-nums">
+                      {completedCount}/{totalCount}
+                    </span>
+                  </div>
+                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-100">
+                    <div
+                      className="h-full rounded-full bg-emerald-500 transition-all"
+                      style={{ width: `${completedPct}%` }}
                     />
-                  </svg>
-                  <span className="text-sm font-medium text-gray-900">
-                    All medications
-                  </span>
+                  </div>
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-sm font-semibold text-gray-900 tabular-nums">
-                    {totalMeds}
-                  </span>
-                  <svg
-                    className={`h-4 w-4 text-gray-400 transition-transform ${medsExpanded ? 'rotate-180' : ''}`}
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                    strokeWidth={1.75}
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      d="m19.5 8.25-7.5 7.5-7.5-7.5"
-                    />
-                  </svg>
-                </div>
+                <svg
+                  className={`ml-3 h-4 w-4 shrink-0 text-gray-400 transition-transform ${tasksExpanded ? 'rotate-180' : ''}`}
+                  fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+                </svg>
               </button>
 
-              {medsExpanded && (
+              {tasksExpanded && (
                 <ul className="divide-y divide-gray-100 border-t border-gray-100">
-                  {medications.map((m) => {
-                    const pill =
-                      m.status === 'given'
-                        ? { bg: 'bg-emerald-50', text: 'text-emerald-700', dot: 'bg-emerald-500', label: 'Given' }
-                        : m.status === 'withheld'
-                          ? { bg: 'bg-amber-50', text: 'text-amber-700', dot: 'bg-amber-500', label: 'Withheld' }
-                          : { bg: 'bg-gray-100', text: 'text-gray-500', dot: 'bg-gray-400', label: 'Pending' };
-
-                    // Always-visible safety line: dose · concentration · route.
-                    // Drop any piece that's null so we don't render trailing "·".
-                    const doseLine = [m.dose, m.concentration, m.route]
-                      .filter((p): p is string => Boolean(p))
-                      .join(' · ');
-
-                    const isOpen = expandedMedCards.has(m.id);
-                    const allergies = patient.allergies.join(', ');
+                  {taskRows.map((t) => {
+                    const isCompleted = t.status === 'completed';
+                    const isWithheld = t.status === 'withheld';
+                    const isOpenOnly = t.type === 'vitals' || t.type === 'narrative';
+                    const isTappable = !isCompleted && !isWithheld;
 
                     return (
-                      <li key={m.id}>
+                      <li key={t.id}>
                         <button
                           type="button"
-                          onClick={() => toggleMedCard(m.id)}
-                          aria-expanded={isOpen}
-                          className="block w-full px-4 py-3 text-left transition-colors hover:bg-gray-50"
+                          onClick={() => handleTaskTap(t)}
+                          disabled={!isTappable}
+                          className={`flex w-full items-center gap-3 px-4 py-3 text-left transition-colors ${
+                            isTappable ? 'hover:bg-gray-50' : 'cursor-default'
+                          }`}
                         >
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-baseline gap-2">
-                                <span className="text-xs font-medium tabular-nums text-gray-500">
-                                  {to12h(m.time)}
-                                </span>
-                                <span className="text-sm font-semibold text-gray-900">
-                                  {m.label}
-                                </span>
-                              </div>
-
-                              {/* Safety line — six fields visible without click */}
-                              {doseLine && (
-                                <p className="mt-0.5 text-xs text-gray-700">
-                                  {doseLine}
-                                </p>
-                              )}
-                              {(m.indication || m.frequency) && (
-                                <p className="mt-0.5 text-xs text-gray-500">
-                                  {m.indication ? `For: ${m.indication}` : ''}
-                                  {m.indication && m.frequency ? ' · ' : ''}
-                                  {m.frequency}
-                                </p>
-                              )}
-
-                              {m.status === 'withheld' && m.reasonWithheld && (
-                                <p className="mt-1 text-xs text-amber-700">
-                                  Withheld: {m.reasonWithheld}
-                                </p>
-                              )}
-                            </div>
-
-                            <div className="flex shrink-0 flex-col items-end gap-1.5">
-                              <div
-                                className={`flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium ${pill.bg} ${pill.text}`}
-                              >
-                                <span
-                                  className={`inline-block h-1.5 w-1.5 rounded-full ${pill.dot}`}
-                                />
-                                {pill.label}
-                              </div>
-                              <svg
-                                className={`h-4 w-4 text-gray-400 transition-transform ${isOpen ? 'rotate-180' : ''}`}
-                                fill="none"
-                                viewBox="0 0 24 24"
-                                stroke="currentColor"
-                                strokeWidth={1.75}
-                              >
-                                <path
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                  d="m19.5 8.25-7.5 7.5-7.5-7.5"
-                                />
+                          {/* Status icon — circle when pending, check when done */}
+                          <span
+                            className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 ${
+                              isCompleted
+                                ? 'border-emerald-500 bg-emerald-500 text-white'
+                                : isWithheld
+                                  ? 'border-amber-500 bg-amber-50 text-amber-600'
+                                  : 'border-gray-300 bg-white text-transparent group-hover:border-emerald-400'
+                            }`}
+                            aria-hidden
+                          >
+                            {(isCompleted || isWithheld) && (
+                              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d={isWithheld ? 'M6 18 18 6M6 6l12 12' : 'm4.5 12.75 6 6 9-13.5'} />
                               </svg>
+                            )}
+                          </span>
+
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-baseline gap-2">
+                              <span className="text-xs font-medium tabular-nums text-gray-500">
+                                {to12h(t.time)}
+                              </span>
+                              <span className={`truncate text-sm font-medium ${isCompleted || isWithheld ? 'text-gray-500 line-through' : 'text-gray-900'}`}>
+                                {t.label}
+                              </span>
                             </div>
+                            {t.sublabel && (
+                              <p className="mt-0.5 text-xs text-gray-400">{t.sublabel}</p>
+                            )}
+                            {isCompleted && t.completedAt && (
+                              <p className="mt-0.5 text-xs text-emerald-600">
+                                Done at {to12h(t.completedAt)}
+                              </p>
+                            )}
+                            {isWithheld && t.reasonWithheld && (
+                              <p className="mt-0.5 text-xs text-amber-700">
+                                Withheld — {t.reasonWithheld}
+                              </p>
+                            )}
                           </div>
+
+                          {/* Right edge affordance: arrow for vitals/narrative pending,
+                              type label otherwise */}
+                          {isOpenOnly && isTappable ? (
+                            <svg className="h-4 w-4 shrink-0 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
+                            </svg>
+                          ) : (
+                            <span className="shrink-0 rounded-full bg-gray-50 px-2 py-0.5 text-[10px] font-medium text-gray-500 capitalize">
+                              {t.type === 'medication' ? 'med' : t.type}
+                            </span>
+                          )}
                         </button>
-
-                        {isOpen && (
-                          <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 border-t border-gray-100 bg-gray-50 px-4 py-3 text-xs">
-                            <dt className="text-gray-500">Instructions</dt>
-                            <dd className="text-gray-900">
-                              {m.instructions ?? (
-                                <span className="text-gray-400 italic">
-                                  None on file
-                                </span>
-                              )}
-                            </dd>
-
-                            <dt className="text-gray-500">Last given</dt>
-                            <dd className="text-gray-900 tabular-nums">
-                              {m.lastGivenAt ? to12h(m.lastGivenAt) : (
-                                <span className="text-gray-400">—</span>
-                              )}
-                            </dd>
-
-                            <dt className="text-gray-500">Allergies</dt>
-                            <dd className="text-gray-900">{allergies}</dd>
-
-                            <dt className="text-gray-500">Order source</dt>
-                            <dd className="text-gray-900">Scheduled (KanTime)</dd>
-                          </dl>
-                        )}
                       </li>
                     );
                   })}
                 </ul>
               )}
             </div>
+            <p className="mt-2 px-1 text-[11px] text-gray-400">
+              Tap a med or intervention to mark it done. Vitals and narrative open in the visit.
+            </p>
           </div>
         )}
 

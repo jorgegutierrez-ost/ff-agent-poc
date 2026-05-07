@@ -7,6 +7,19 @@ import type {
 
 // ─── Patients ────────────────────────────────────────────────
 
+export async function getPatientById(patientId: string): Promise<Patient | null> {
+  const { rows } = await pool.query(
+    `SELECT id, kantime_patient_id, full_name, date_of_birth,
+            age_months, age_years, allergies, primary_diagnosis,
+            cpr_code, last_weight_lbs, last_height_inches,
+            last_vitals_date, emergency_contact_name,
+            emergency_contact_phone, emergency_contact_relation
+     FROM patients WHERE id = $1`,
+    [patientId],
+  );
+  return rows[0] ?? null;
+}
+
 export async function getPatients(): Promise<Patient[]> {
   const { rows } = await pool.query(
     `SELECT id, kantime_patient_id, full_name, date_of_birth,
@@ -384,6 +397,354 @@ export interface PrnOrderRow {
   max_frequency_hours: number | null;
   notes: string | null;
   active: boolean;
+}
+
+// ─── Recent-history brief (for visit-start recap) ────────────
+
+export interface RecentBriefVisitRow {
+  visit_id: string;
+  visit_date: string;
+  planned_start_time: string;
+  vitals: Array<{
+    bp_systolic: number | null;
+    bp_diastolic: number | null;
+    heart_rate: number | null;
+    respiratory_rate: number | null;
+    temperature_f: number | null;
+    o2_saturation: number | null;
+    pain_score: number | null;
+  }>;
+  medications: Array<{
+    name: string;
+    given: boolean;
+    reason_withheld: string | null;
+  }>;
+  narrative: string | null;
+}
+
+/**
+ * Fetches the last `limit` completed visits for a patient within `daysBack`,
+ * each with its vitals, medications, and narrative content. Used to compute
+ * recap highlights at visit start. Excludes the in-progress visit if given.
+ */
+export async function getPatientRecentBrief(
+  patientId: string,
+  options: { daysBack?: number; limit?: number; excludeVisitId?: string } = {},
+): Promise<RecentBriefVisitRow[]> {
+  const daysBack = options.daysBack ?? 14;
+  const limit = Math.min(Math.max(options.limit ?? 5, 1), 10);
+
+  const params: unknown[] = [patientId, daysBack];
+  let exclude = '';
+  if (options.excludeVisitId) {
+    params.push(options.excludeVisitId);
+    exclude = ` AND v.id <> $${params.length}`;
+  }
+  params.push(limit);
+
+  const { rows: visits } = await pool.query(
+    `SELECT v.id AS visit_id, v.visit_date,
+            v.planned_start_time::text AS planned_start_time
+     FROM visits v
+     WHERE v.patient_id = $1
+       AND v.status = 'completed'
+       AND v.visit_date >= CURRENT_DATE - ($2::int)
+       ${exclude}
+     ORDER BY v.visit_date DESC, v.planned_start_time DESC
+     LIMIT $${params.length}`,
+    params,
+  );
+
+  if (visits.length === 0) return [];
+
+  const ids = visits.map((v: { visit_id: string }) => v.visit_id);
+
+  // Pull child rows in three small queries; cheap given limit ≤ 10.
+  const [{ rows: vitalsRows }, { rows: medRows }, { rows: narrRows }] = await Promise.all([
+    pool.query(
+      `SELECT visit_id, bp_systolic, bp_diastolic, heart_rate,
+              respiratory_rate, temperature_f, o2_saturation, pain_score,
+              occurred_at, recorded_at
+       FROM vital_signs
+       WHERE visit_id = ANY($1::uuid[])
+       ORDER BY visit_id, COALESCE(occurred_at, recorded_at) ASC`,
+      [ids],
+    ),
+    pool.query(
+      `SELECT visit_id, name, given, reason_withheld
+       FROM medications
+       WHERE visit_id = ANY($1::uuid[])
+       ORDER BY visit_id, recorded_at ASC`,
+      [ids],
+    ),
+    pool.query(
+      `SELECT visit_id, content
+       FROM narratives
+       WHERE visit_id = ANY($1::uuid[])`,
+      [ids],
+    ),
+  ]);
+
+  return visits.map((v: { visit_id: string; visit_date: unknown; planned_start_time: string }) => ({
+    visit_id: v.visit_id,
+    visit_date: v.visit_date instanceof Date
+      ? v.visit_date.toISOString().split('T')[0]
+      : String(v.visit_date).split('T')[0],
+    planned_start_time: v.planned_start_time,
+    vitals: vitalsRows
+      .filter((r: { visit_id: string }) => r.visit_id === v.visit_id)
+      .map((r: Record<string, unknown>) => ({
+        bp_systolic:      r.bp_systolic      as number | null,
+        bp_diastolic:     r.bp_diastolic     as number | null,
+        heart_rate:       r.heart_rate       as number | null,
+        respiratory_rate: r.respiratory_rate as number | null,
+        temperature_f:    r.temperature_f != null ? Number(r.temperature_f) : null,
+        o2_saturation:    r.o2_saturation    as number | null,
+        pain_score:       r.pain_score       as number | null,
+      })),
+    medications: medRows
+      .filter((r: { visit_id: string }) => r.visit_id === v.visit_id)
+      .map((r: { name: string; given: boolean; reason_withheld: string | null }) => ({
+        name: r.name,
+        given: r.given,
+        reason_withheld: r.reason_withheld,
+      })),
+    narrative: narrRows.find((r: { visit_id: string }) => r.visit_id === v.visit_id)?.content ?? null,
+  }));
+}
+
+// ─── Patient History Search (Aria Q&A tool) ──────────────────
+
+export interface PatientHistoryQuery {
+  query?: string;
+  medicationName?: string;
+  daysBack?: number;
+  limit?: number;
+  excludeVisitId?: string;
+}
+
+export interface PatientHistoryVisit {
+  visit_id: string;
+  visit_date: string;
+  narrative: string | null;
+  narrative_match_excerpt: string | null;
+  vitals: Array<{
+    bp_systolic: number | null;
+    bp_diastolic: number | null;
+    heart_rate: number | null;
+    respiratory_rate: number | null;
+    temperature_f: number | null;
+    o2_saturation: number | null;
+    pain_score: number | null;
+    occurred_at: string | null;
+  }>;
+  medications: Array<{
+    name: string;
+    dose: string | null;
+    route: string | null;
+    given: boolean;
+    reason_withheld: string | null;
+    administered_at: string | null;
+  }>;
+}
+
+function escapeLike(s: string): string {
+  return s.replace(/([\\%_])/g, '\\$1');
+}
+
+function excerptAround(content: string, query: string, window = 120): string | null {
+  const lower = content.toLowerCase();
+  const idx = lower.indexOf(query.toLowerCase());
+  if (idx < 0) return null;
+  const start = Math.max(0, idx - Math.floor(window / 2));
+  const end = Math.min(content.length, idx + query.length + Math.floor(window / 2));
+  const slice = content.slice(start, end).replace(/\s+/g, ' ').trim();
+  const prefix = start > 0 ? '…' : '';
+  const suffix = end < content.length ? '…' : '';
+  return `${prefix}${slice}${suffix}`;
+}
+
+/**
+ * Searches a patient's past completed visits by free-text and/or medication
+ * name, returning fully-joined visits with vitals, medications, and the
+ * narrative content. Used by Aria's `search_patient_history` tool — keep
+ * the response shape stable so the model has predictable structure.
+ */
+export async function searchPatientHistory(
+  patientId: string,
+  opts: PatientHistoryQuery = {},
+): Promise<PatientHistoryVisit[]> {
+  const daysBack = Math.min(Math.max(opts.daysBack ?? 14, 1), 90);
+  const limit    = Math.min(Math.max(opts.limit    ?? 5,  1), 20);
+
+  const params: unknown[] = [patientId, daysBack];
+  const where: string[] = [
+    `v.patient_id = $1`,
+    `v.status = 'completed'`,
+    `v.visit_date >= CURRENT_DATE - ($2::int)`,
+  ];
+
+  if (opts.excludeVisitId) {
+    params.push(opts.excludeVisitId);
+    where.push(`v.id <> $${params.length}`);
+  }
+
+  if (opts.query && opts.query.trim()) {
+    params.push(`%${escapeLike(opts.query.trim())}%`);
+    const idx = params.length;
+    where.push(`n.content ILIKE $${idx}`);
+  }
+
+  if (opts.medicationName && opts.medicationName.trim()) {
+    params.push(`%${escapeLike(opts.medicationName.trim())}%`);
+    const idx = params.length;
+    where.push(`EXISTS (SELECT 1 FROM medications m WHERE m.visit_id = v.id AND m.name ILIKE $${idx})`);
+  }
+
+  params.push(limit);
+
+  const { rows: visitRows } = await pool.query(
+    `SELECT v.id AS visit_id, v.visit_date, n.content AS narrative
+     FROM visits v
+     LEFT JOIN narratives n ON n.visit_id = v.id
+     WHERE ${where.join(' AND ')}
+     ORDER BY v.visit_date DESC, v.planned_start_time DESC
+     LIMIT $${params.length}`,
+    params,
+  );
+
+  if (visitRows.length === 0) return [];
+  const ids = visitRows.map((r: { visit_id: string }) => r.visit_id);
+
+  // For medication-name searches, only return matching meds (not every med
+  // on those days) — keeps the tool response focused on what the nurse
+  // asked about. Other queries get the full med list.
+  const medParams: unknown[] = [ids];
+  let medFilter = '';
+  if (opts.medicationName && opts.medicationName.trim()) {
+    medParams.push(`%${escapeLike(opts.medicationName.trim())}%`);
+    medFilter = ` AND name ILIKE $${medParams.length}`;
+  }
+
+  const [{ rows: vitalsRows }, { rows: medRows }] = await Promise.all([
+    pool.query(
+      `SELECT visit_id, bp_systolic, bp_diastolic, heart_rate,
+              respiratory_rate, temperature_f, o2_saturation, pain_score,
+              occurred_at
+       FROM vital_signs
+       WHERE visit_id = ANY($1::uuid[])
+       ORDER BY visit_id, COALESCE(occurred_at, recorded_at) ASC`,
+      [ids],
+    ),
+    pool.query(
+      `SELECT visit_id, name, dose, route, given, reason_withheld, administered_at
+       FROM medications
+       WHERE visit_id = ANY($1::uuid[])${medFilter}
+       ORDER BY visit_id, COALESCE(administered_at, recorded_at) ASC`,
+      medParams,
+    ),
+  ]);
+
+  return visitRows.map((v: { visit_id: string; visit_date: unknown; narrative: string | null }) => ({
+    visit_id: v.visit_id,
+    visit_date: v.visit_date instanceof Date
+      ? v.visit_date.toISOString().split('T')[0]
+      : String(v.visit_date).split('T')[0],
+    narrative: v.narrative,
+    narrative_match_excerpt: opts.query && v.narrative
+      ? excerptAround(v.narrative, opts.query)
+      : null,
+    vitals: vitalsRows
+      .filter((r: { visit_id: string }) => r.visit_id === v.visit_id)
+      .map((r: Record<string, unknown>) => ({
+        bp_systolic:      r.bp_systolic      as number | null,
+        bp_diastolic:     r.bp_diastolic     as number | null,
+        heart_rate:       r.heart_rate       as number | null,
+        respiratory_rate: r.respiratory_rate as number | null,
+        temperature_f:    r.temperature_f != null ? Number(r.temperature_f) : null,
+        o2_saturation:    r.o2_saturation    as number | null,
+        pain_score:       r.pain_score       as number | null,
+        occurred_at:      (r.occurred_at instanceof Date)
+                            ? r.occurred_at.toISOString()
+                            : (r.occurred_at as string | null),
+      })),
+    medications: medRows
+      .filter((r: { visit_id: string }) => r.visit_id === v.visit_id)
+      .map((r: Record<string, unknown>) => ({
+        name:            r.name as string,
+        dose:            r.dose as string | null,
+        route:           r.route as string | null,
+        given:           r.given as boolean,
+        reason_withheld: r.reason_withheld as string | null,
+        administered_at: (r.administered_at instanceof Date)
+                            ? r.administered_at.toISOString()
+                            : (r.administered_at as string | null),
+      })),
+  }));
+}
+
+// ─── Past Visits Search ──────────────────────────────────────
+
+export interface PastVisitSearchOptions {
+  patientId?: string;
+  q?: string;
+  limit?: number;
+}
+
+export interface PastVisitRow {
+  id: string;
+  visit_date: string;
+  planned_start_time: string;
+  planned_end_time: string;
+  service_type: string;
+  payer: string | null;
+  patient_id: string;
+  patient_name: string;
+  narrative_excerpt: string | null;
+}
+
+export async function searchPastVisits(
+  nurseId: string,
+  opts: PastVisitSearchOptions = {},
+): Promise<PastVisitRow[]> {
+  const params: unknown[] = [nurseId];
+  const where: string[] = [
+    `v.nurse_id = $1`,
+    `v.visit_date < CURRENT_DATE`,
+    `v.status = 'completed'`,
+  ];
+
+  if (opts.patientId) {
+    params.push(opts.patientId);
+    where.push(`v.patient_id = $${params.length}`);
+  }
+
+  if (opts.q && opts.q.trim()) {
+    params.push(`%${opts.q.trim()}%`);
+    const idx = params.length;
+    // Match on narrative content OR patient name; one ILIKE pattern, two columns.
+    where.push(`(n.content ILIKE $${idx} OR p.full_name ILIKE $${idx})`);
+  }
+
+  const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
+  params.push(limit);
+
+  const { rows } = await pool.query(
+    `SELECT v.id, v.visit_date,
+            v.planned_start_time::text, v.planned_end_time::text,
+            v.service_type, v.payer,
+            v.patient_id, p.full_name AS patient_name,
+            n.content AS narrative_excerpt
+     FROM visits v
+     JOIN patients p ON p.id = v.patient_id
+     LEFT JOIN narratives n ON n.visit_id = v.id
+     WHERE ${where.join(' AND ')}
+     ORDER BY v.visit_date DESC, v.planned_start_time DESC
+     LIMIT $${params.length}`,
+    params,
+  );
+
+  return rows;
 }
 
 export async function getPrnOrders(patientId: string): Promise<PrnOrderRow[]> {

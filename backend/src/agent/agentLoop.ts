@@ -195,6 +195,7 @@ export async function runAgentLoop(
   conversationHistory: ConversationMessage[],
   scheduledTasks: ScheduledTaskForPrompt[] = [],
   prnOrders: PrnOrderForPrompt[] = [],
+  recentHighlights = '',
 ): Promise<void> {
   const systemPrompt = buildSystemPrompt(
     patient,
@@ -202,6 +203,7 @@ export async function runAgentLoop(
     NURSE_NAME,
     scheduledTasks,
     prnOrders,
+    recentHighlights,
   );
   let messages = toAnthropicMessages(conversationHistory);
 
@@ -304,8 +306,9 @@ export async function runAgentLoop(
         // Notify client
         sendWs(ws, { type: 'tool_call', tool: toolBlock.name, input: toolBlock.input });
 
-        // Execute tool
-        const result = await executeToolCall(toolBlock.name, toolBlock.input);
+        // Execute tool — pass current visit context so tools that need it
+        // (e.g. search_patient_history's excludeVisitId) can self-scope.
+        const result = await executeToolCall(toolBlock.name, toolBlock.input, { visitId });
 
         // Notify client
         sendWs(ws, {
