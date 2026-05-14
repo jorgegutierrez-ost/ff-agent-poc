@@ -93,12 +93,20 @@ function ScheduleCard({ item, isOverdue, onQuickAction }: ScheduleCardProps) {
   const medLine = isMed ? buildMedLine(item.dose, item.concentration, item.route) : '';
   const subText = isMed ? medLine : item.sublabel;
 
+  // Interventions render as a generic "things to do" — no scheduled time,
+  // no overdue/late framing. Once completed, still show the completion
+  // time so the nurse can see when it happened.
+  const isIntervention = item.type === 'intervention';
+  const showTime = !isIntervention || (isDone && item.completedAt);
+  const showLateHint = isOverdue && !isIntervention;
+  const effectiveOverdue = isOverdue && !isIntervention;
+
   return (
     <div
       className={`rounded-xl border px-4 py-3 transition-all duration-500 ${
         isDone
           ? 'border-emerald-100 bg-emerald-50/50 animate-[completeCard_0.5s_ease-out]'
-          : isOverdue
+          : effectiveOverdue
             ? 'border-red-200 bg-white'
             : 'border-gray-200 bg-white'
       }`}
@@ -114,7 +122,7 @@ function ScheduleCard({ item, isOverdue, onQuickAction }: ScheduleCardProps) {
                 </svg>
               </div>
             ) : (
-              <div className={isOverdue ? 'text-red-400' : 'text-gray-400'}>
+              <div className={effectiveOverdue ? 'text-red-400' : 'text-gray-400'}>
                 <TypeIcon type={item.type} />
               </div>
             )}
@@ -135,10 +143,12 @@ function ScheduleCard({ item, isOverdue, onQuickAction }: ScheduleCardProps) {
           </div>
         </div>
         <div className="shrink-0 text-right">
-          <span className={`text-sm tabular-nums transition-colors duration-300 ${isDone ? 'text-gray-300' : 'text-gray-500'}`}>
-            {formatTime(isDone && item.completedAt ? item.completedAt : item.scheduledTime)}
-          </span>
-          {isOverdue && item.lateMinutes && (
+          {showTime && (
+            <span className={`text-sm tabular-nums transition-colors duration-300 ${isDone ? 'text-gray-300' : 'text-gray-500'}`}>
+              {formatTime(isDone && item.completedAt ? item.completedAt : item.scheduledTime)}
+            </span>
+          )}
+          {showLateHint && item.lateMinutes && (
             <p className="mt-0.5 text-xs font-medium text-red-500">
               {item.lateMinutes} min late
             </p>
