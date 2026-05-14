@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { ScheduleItem } from '../types';
+import { buildMedLine } from '../lib/medicationFormat';
 
 // ─── Shared time-field helper ────────────────────────────────
 //
@@ -40,11 +41,7 @@ interface ScheduledHeaderProps {
 
 function ScheduledHeader({ item }: ScheduledHeaderProps) {
   const isMed = item.type === 'medication';
-  const doseLine = isMed
-    ? [item.dose, item.concentration, item.route]
-        .filter((p): p is string => Boolean(p))
-        .join(' · ')
-    : '';
+  const doseLine = isMed ? buildMedLine(item.dose, item.concentration, item.route) : '';
   const indication = isMed ? item.indication : null;
 
   // PRN orders carry no scheduled time. Show a PRN badge instead so the

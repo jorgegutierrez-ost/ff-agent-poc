@@ -1,8 +1,8 @@
 import { useState, useMemo } from 'react';
 import type { Patient, ScheduleItem, SuctionEvent } from '../types';
 import type { PrnOrder, LoggedMed } from './VisitPage';
-import { getCareNote } from '../lib/careNotes';
 import { fuzzyMatch } from '../lib/medicationMatch';
+import { buildMedLine } from '../lib/medicationFormat';
 
 const ANIMATIONS_CSS = `
 @keyframes popIn {
@@ -86,6 +86,13 @@ interface ScheduleCardProps {
 function ScheduleCard({ item, isOverdue, onQuickAction }: ScheduleCardProps) {
   const isDone = item.status === 'completed' || item.status === 'skipped';
 
+  // Medication cards: render "Give <dose> (<concentration>) · <route>" in
+  // place of the generic sublabel so the nurse always sees the dose,
+  // concentration it's based on, and route at a glance.
+  const isMed = item.type === 'medication';
+  const medLine = isMed ? buildMedLine(item.dose, item.concentration, item.route) : '';
+  const subText = isMed ? medLine : item.sublabel;
+
   return (
     <div
       className={`rounded-xl border px-4 py-3 transition-all duration-500 ${
@@ -123,7 +130,7 @@ function ScheduleCard({ item, isOverdue, onQuickAction }: ScheduleCardProps) {
               {item.label}
             </p>
             <p className={`mt-0.5 text-xs transition-colors duration-300 ${isDone ? 'text-gray-300' : 'text-gray-400'}`}>
-              {item.sublabel}
+              {subText}
             </p>
           </div>
         </div>
@@ -332,9 +339,9 @@ function ScheduleTab({
         detail = `Skipped${item.completedAction ? ' \u00B7 ' + item.completedAction : ''}`;
       } else if (item.type === 'medication') {
         kind = 'medication';
-        const dosePart = [item.dose, item.route].filter((p): p is string => Boolean(p)).join(' \u00B7 ');
-        primary = `${item.label}${item.dose ? ' ' + item.dose : ''}`;
-        detail = dosePart ? `${dosePart} \u00B7 given` : 'Given';
+        primary = item.label;
+        const medLine = buildMedLine(item.dose, item.concentration, item.route);
+        detail = medLine ? `${medLine} \u00B7 given` : 'Given';
       } else if (item.type === 'vitals') {
         kind = 'vitals';
         detail = item.completedAction ?? 'Recorded';
@@ -673,7 +680,7 @@ function PrnTab({
                   )}
                 </div>
                 <p className="mt-0.5 text-xs text-gray-700">
-                  {order.dose} · {order.route}
+                  {buildMedLine(order.dose, null, order.route)}
                 </p>
                 <p className="mt-0.5 text-[11px] text-gray-500">
                   For: {order.indication}
@@ -707,7 +714,6 @@ function PrnTab({
 }
 
 function PatientTab({ patient }: { patient: Patient }) {
-  const careNote = getCareNote(patient.id);
   const phoneHref = patient.emergency_contact_phone
     ? `tel:${patient.emergency_contact_phone.replace(/[^\d+]/g, '')}`
     : null;
@@ -767,16 +773,6 @@ function PatientTab({ patient }: { patient: Patient }) {
           <p className="mt-1 text-sm text-gray-400">No phone on file</p>
         )}
       </section>
-
-      {/* Care notes */}
-      {careNote && (
-        <section>
-          <h3 className="mb-1 text-[11px] font-semibold tracking-widest text-gray-400 uppercase">
-            Care notes
-          </h3>
-          <p className="text-xs leading-relaxed text-gray-700">{careNote}</p>
-        </section>
-      )}
     </div>
   );
 }

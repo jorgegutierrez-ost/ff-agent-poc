@@ -470,6 +470,14 @@ export default function VisitPage({
 
       {/* ── Body ── */}
       <div className="flex flex-1 overflow-hidden">
+        <VisitSchedule
+          patient={patient}
+          items={scheduleItems}
+          prnOrders={prnOrders}
+          loggedMeds={loggedMeds}
+          suctionEvents={suctionEvents}
+          onQuickAction={handleQuickAction}
+        />
         <ChatPanel
           messages={messages}
           isStreaming={isStreaming}
@@ -479,14 +487,6 @@ export default function VisitPage({
           onSendMessage={onSendMessage}
           onFormSubmit={handleFormSubmit}
           onFormCancel={handleFormCancel}
-        />
-        <VisitSchedule
-          patient={patient}
-          items={scheduleItems}
-          prnOrders={prnOrders}
-          loggedMeds={loggedMeds}
-          suctionEvents={suctionEvents}
-          onQuickAction={handleQuickAction}
         />
       </div>
     </div>

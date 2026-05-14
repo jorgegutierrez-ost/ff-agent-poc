@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { Patient, Visit } from '../types';
 import { API_BASE } from './../config';
 import { fuzzyMatch } from '../lib/medicationMatch';
-import { CARE_NOTES } from '../lib/careNotes';
+import { buildMedLine } from '../lib/medicationFormat';
 
 interface PatientDetailSidebarProps {
   patient: Patient;
@@ -126,18 +126,8 @@ export default function PatientDetailSidebar({
 }: PatientDetailSidebarProps) {
   const [tasks, setTasks] = useState<ScheduledTask[]>([]);
   const [loggedMeds, setLoggedMeds] = useState<LoggedMedication[]>([]);
-  const [loggedInterventions, setLoggedInterventions] = useState<
-    Array<{ id: string; name: string; recorded_at: string; occurred_at?: string | null }>
-  >([]);
-  const [hasVitals, setHasVitals] = useState(false);
-  const [hasNarrative, setHasNarrative] = useState(false);
   const [prnOrders, setPrnOrders] = useState<PrnOrder[]>([]);
-  const [tasksExpanded, setTasksExpanded] = useState(true);
   const [prnExpanded, setPrnExpanded] = useState(false);
-  // Optimistic completion tracking — tap-to-complete adds the task ID
-  // here immediately so the UI reflects the change before the POST resolves.
-  // Reverted on failure.
-  const [localCompleted, setLocalCompleted] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -146,7 +136,7 @@ export default function PatientDetailSidebar({
         r.ok ? r.json() : [],
       ),
       fetch(`${API_BASE}/api/visits/${visit.id}/summary`).then((r) =>
-        r.ok ? r.json() : { medications: [], interventions: [], all_vitals: [], narrative: null },
+        r.ok ? r.json() : { medications: [] },
       ),
       fetch(`${API_BASE}/api/patients/${patient.id}/prn-orders`).then((r) =>
         r.ok ? r.json() : [],
@@ -156,9 +146,6 @@ export default function PatientDetailSidebar({
         if (cancelled) return;
         setTasks(schedule as ScheduledTask[]);
         setLoggedMeds((summary?.medications ?? []) as LoggedMedication[]);
-        setLoggedInterventions(summary?.interventions ?? []);
-        setHasVitals((summary?.all_vitals ?? []).length > 0);
-        setHasNarrative(summary?.narrative != null);
         setPrnOrders(prn as PrnOrder[]);
       })
       .catch(() => {});
@@ -218,139 +205,6 @@ export default function PatientDetailSidebar({
       };
     });
   }, [tasks, loggedMeds]);
-
-  // ── Unified task list (Today's tasks checklist) ─────────────────────
-  type TaskStatus = 'pending' | 'completed' | 'withheld';
-  interface TaskRow {
-    id: string;
-    type: 'medication' | 'intervention' | 'vitals' | 'narrative';
-    time: string;            // HH:MM
-    label: string;
-    sublabel: string;
-    status: TaskStatus;
-    completedAt?: string;    // HH:MM when status === 'completed'
-    reasonWithheld?: string;
-    dose?: string | null;
-    route?: string | null;
-  }
-
-  function formatHHMM(src: string | null | undefined): string | undefined {
-    if (!src) return undefined;
-    const d = new Date(src);
-    if (Number.isNaN(d.getTime())) return undefined;
-    return d.toLocaleTimeString('en-US', {
-      hour: '2-digit', minute: '2-digit', hour12: false,
-    });
-  }
-
-  const taskRows: TaskRow[] = useMemo(() => {
-    const sorted = [...tasks].sort((a, b) => a.scheduled_time.localeCompare(b.scheduled_time));
-    const medPool = [...loggedMeds];
-    const intPool = [...loggedInterventions];
-    let vitalsConsumed = 0;
-    let narrativeConsumed = false;
-    const totalVitalsTasks = sorted.filter((t) => t.type === 'vitals').length;
-    const seededVitals = hasVitals;
-
-    return sorted.map((t) => {
-      let status: TaskStatus = 'pending';
-      let completedAt: string | undefined;
-      let reasonWithheld: string | undefined;
-
-      if (localCompleted.has(t.id)) {
-        status = 'completed';
-        completedAt = new Date().toLocaleTimeString('en-US', {
-          hour: '2-digit', minute: '2-digit', hour12: false,
-        });
-      } else if (t.type === 'medication') {
-        const idx = medPool.findIndex((m) => fuzzyMatch(t.label, m.name));
-        const match = idx >= 0 ? medPool.splice(idx, 1)[0] : null;
-        if (match) {
-          if (match.given) {
-            status = 'completed';
-            completedAt = formatHHMM(match.administered_at ?? match.recorded_at);
-          } else {
-            status = 'withheld';
-            reasonWithheld = match.reason_withheld;
-          }
-        }
-      } else if (t.type === 'intervention') {
-        const idx = intPool.findIndex((i) => fuzzyMatch(t.label, i.name));
-        const match = idx >= 0 ? intPool.splice(idx, 1)[0] : null;
-        if (match) {
-          status = 'completed';
-          completedAt = formatHHMM(match.occurred_at ?? match.recorded_at);
-        }
-      } else if (t.type === 'vitals') {
-        // Fold the count of vitals rows across vitals tasks. If we have
-        // fewer rows than vitals tasks, the earliest tasks are marked
-        // complete first.
-        if (seededVitals && vitalsConsumed < totalVitalsTasks) {
-          status = 'completed';
-          vitalsConsumed += 1;
-        }
-      } else if (t.type === 'narrative') {
-        if (hasNarrative && !narrativeConsumed) {
-          status = 'completed';
-          narrativeConsumed = true;
-        }
-      }
-
-      return {
-        id: t.id,
-        type: t.type,
-        time: t.scheduled_time.slice(0, 5),
-        label: t.label,
-        sublabel: t.sublabel ?? '',
-        status, completedAt, reasonWithheld,
-        dose: t.dose ?? null,
-        route: t.route ?? null,
-      };
-    });
-  }, [tasks, loggedMeds, loggedInterventions, hasVitals, hasNarrative, localCompleted]);
-
-  const totalCount = taskRows.length;
-  const completedCount = taskRows.filter((t) => t.status !== 'pending').length;
-  const completedPct = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
-
-  // Tap handler — meds + interventions write directly via the existing form
-  // endpoints. Vitals + narrative bounce to the live visit because they
-  // require values the dashboard doesn't capture.
-  async function handleTaskTap(t: TaskRow) {
-    if (t.status !== 'pending') return;
-    if (t.type === 'vitals' || t.type === 'narrative') {
-      onBeginVisit(patient.id);
-      return;
-    }
-
-    setLocalCompleted((prev) => {
-      const next = new Set(prev);
-      next.add(t.id);
-      return next;
-    });
-
-    const nowIso = new Date().toISOString();
-    try {
-      const url = t.type === 'medication'
-        ? `${API_BASE}/api/visits/${visit.id}/medications`
-        : `${API_BASE}/api/visits/${visit.id}/interventions`;
-      const body = t.type === 'medication'
-        ? { name: t.label, dose: t.dose, route: t.route, given: true, administered_at: nowIso }
-        : { name: t.label, occurred_at: nowIso };
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!resp.ok) throw new Error('save failed');
-    } catch {
-      setLocalCompleted((prev) => {
-        const next = new Set(prev);
-        next.delete(t.id);
-        return next;
-      });
-    }
-  }
 
   // Overdue = pending meds whose scheduled time is in the past (only while
   // the visit is actively in progress).
@@ -421,8 +275,6 @@ export default function PatientDetailSidebar({
   } else {
     ctaLabel = `Begin visit with ${getFirstName(patient.full_name)}`;
   }
-
-  const careNote = CARE_NOTES[patient.id];
 
   return (
     <div className="flex h-full w-[380px] shrink-0 flex-col border-l border-gray-200 bg-gray-50">
@@ -694,121 +546,6 @@ export default function PatientDetailSidebar({
           <p className="text-sm text-gray-900">{patient.primary_diagnosis}</p>
         </div>
 
-        {/* ── 8. Today's tasks (unified checklist with tap-to-complete) ── */}
-        {totalCount > 0 && (
-          <div className="px-6 pb-4">
-            <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white">
-              <button
-                onClick={() => setTasksExpanded((v) => !v)}
-                className="flex w-full items-center justify-between px-4 py-3 transition-colors hover:bg-gray-50"
-                aria-expanded={tasksExpanded}
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-sm font-semibold text-gray-900">Today's tasks</span>
-                    <span className="text-sm font-semibold text-gray-900 tabular-nums">
-                      {completedCount}/{totalCount}
-                    </span>
-                  </div>
-                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-100">
-                    <div
-                      className="h-full rounded-full bg-emerald-500 transition-all"
-                      style={{ width: `${completedPct}%` }}
-                    />
-                  </div>
-                </div>
-                <svg
-                  className={`ml-3 h-4 w-4 shrink-0 text-gray-400 transition-transform ${tasksExpanded ? 'rotate-180' : ''}`}
-                  fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}
-                >
-                  <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
-                </svg>
-              </button>
-
-              {tasksExpanded && (
-                <ul className="divide-y divide-gray-100 border-t border-gray-100">
-                  {taskRows.map((t) => {
-                    const isCompleted = t.status === 'completed';
-                    const isWithheld = t.status === 'withheld';
-                    const isOpenOnly = t.type === 'vitals' || t.type === 'narrative';
-                    const isTappable = !isCompleted && !isWithheld;
-
-                    return (
-                      <li key={t.id}>
-                        <button
-                          type="button"
-                          onClick={() => handleTaskTap(t)}
-                          disabled={!isTappable}
-                          className={`flex w-full items-center gap-3 px-4 py-3 text-left transition-colors ${
-                            isTappable ? 'hover:bg-gray-50' : 'cursor-default'
-                          }`}
-                        >
-                          {/* Status icon — circle when pending, check when done */}
-                          <span
-                            className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 ${
-                              isCompleted
-                                ? 'border-emerald-500 bg-emerald-500 text-white'
-                                : isWithheld
-                                  ? 'border-amber-500 bg-amber-50 text-amber-600'
-                                  : 'border-gray-300 bg-white text-transparent group-hover:border-emerald-400'
-                            }`}
-                            aria-hidden
-                          >
-                            {(isCompleted || isWithheld) && (
-                              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-                                <path strokeLinecap="round" strokeLinejoin="round" d={isWithheld ? 'M6 18 18 6M6 6l12 12' : 'm4.5 12.75 6 6 9-13.5'} />
-                              </svg>
-                            )}
-                          </span>
-
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-baseline gap-2">
-                              <span className="text-xs font-medium tabular-nums text-gray-500">
-                                {to12h(t.time)}
-                              </span>
-                              <span className={`truncate text-sm font-medium ${isCompleted || isWithheld ? 'text-gray-500 line-through' : 'text-gray-900'}`}>
-                                {t.label}
-                              </span>
-                            </div>
-                            {t.sublabel && (
-                              <p className="mt-0.5 text-xs text-gray-400">{t.sublabel}</p>
-                            )}
-                            {isCompleted && t.completedAt && (
-                              <p className="mt-0.5 text-xs text-emerald-600">
-                                Done at {to12h(t.completedAt)}
-                              </p>
-                            )}
-                            {isWithheld && t.reasonWithheld && (
-                              <p className="mt-0.5 text-xs text-amber-700">
-                                Withheld — {t.reasonWithheld}
-                              </p>
-                            )}
-                          </div>
-
-                          {/* Right edge affordance: arrow for vitals/narrative pending,
-                              type label otherwise */}
-                          {isOpenOnly && isTappable ? (
-                            <svg className="h-4 w-4 shrink-0 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
-                              <path strokeLinecap="round" strokeLinejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
-                            </svg>
-                          ) : (
-                            <span className="shrink-0 rounded-full bg-gray-50 px-2 py-0.5 text-[10px] font-medium text-gray-500 capitalize">
-                              {t.type === 'medication' ? 'med' : t.type}
-                            </span>
-                          )}
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </div>
-            <p className="mt-2 px-1 text-[11px] text-gray-400">
-              Tap a med or intervention to mark it done. Vitals and narrative open in the visit.
-            </p>
-          </div>
-        )}
-
         {/* ── 9b. PRN orders (as-needed standing orders) ── */}
         {prnOrders.length > 0 && (
           <div className="px-6 pb-4">
@@ -860,7 +597,7 @@ export default function PatientDetailSidebar({
                     <li key={o.id} className="px-4 py-3">
                       <div className="flex items-baseline justify-between gap-3">
                         <span className="text-sm font-medium text-gray-900">
-                          {o.medication} {o.dose}
+                          {o.medication}
                         </span>
                         {o.max_frequency_hours != null && (
                           <span className="shrink-0 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700">
@@ -868,7 +605,9 @@ export default function PatientDetailSidebar({
                           </span>
                         )}
                       </div>
-                      <p className="mt-0.5 text-xs text-gray-500">{o.route}</p>
+                      <p className="mt-0.5 text-xs text-gray-500">
+                        {buildMedLine(o.dose, null, o.route)}
+                      </p>
                       <p className="mt-1 text-xs text-gray-700">
                         <span className="font-medium text-gray-500">For: </span>
                         {o.indication}
@@ -886,19 +625,6 @@ export default function PatientDetailSidebar({
           </div>
         )}
 
-        {/* ── 10. Care Note ── */}
-        {careNote && (
-          <div className="px-6 pb-8">
-            <h3 className="mb-1.5 text-[11px] font-semibold tracking-widest text-gray-400 uppercase">
-              Care Note
-            </h3>
-            <div className="rounded-2xl border border-gray-200 bg-white p-4">
-              <p className="text-sm leading-relaxed text-gray-600 italic">
-                {careNote}
-              </p>
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );

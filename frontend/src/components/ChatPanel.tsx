@@ -53,8 +53,75 @@ export default function ChatPanel({
   const recorder = useAudioRecorder(onSendMessage);
   const tts = useAudioPlayer();
 
-  const [autoSpeak, setAutoSpeak] = useState(true);
+  // Mute deadline: null = not muted, 'forever' = until manually unmuted,
+  // number = ms-since-epoch when the mute auto-expires.
+  const [muteUntil, setMuteUntil] = useState<number | 'forever' | null>(null);
+  const [muteMenuOpen, setMuteMenuOpen] = useState(false);
+  const muteMenuRef = useRef<HTMLDivElement>(null);
+  const isMuted =
+    muteUntil === 'forever' ||
+    (typeof muteUntil === 'number' && muteUntil > Date.now());
+  const autoSpeak = !isMuted;
   const lastSpokenIdRef = useRef<string | null>(lastLoadedMsgId);
+
+  // Auto-restore auto-speak when a timed mute expires.
+  useEffect(() => {
+    if (typeof muteUntil !== 'number') return;
+    const ms = muteUntil - Date.now();
+    if (ms <= 0) {
+      setMuteUntil(null);
+      return;
+    }
+    const id = window.setTimeout(() => setMuteUntil(null), ms);
+    return () => window.clearTimeout(id);
+  }, [muteUntil]);
+
+  // Dismiss the mute menu on outside click.
+  useEffect(() => {
+    if (!muteMenuOpen) return;
+    function onDocClick(e: MouseEvent) {
+      if (!muteMenuRef.current?.contains(e.target as Node)) {
+        setMuteMenuOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [muteMenuOpen]);
+
+  function handleSpeakerClick() {
+    if (isMuted) {
+      setMuteUntil(null);
+      setMuteMenuOpen(false);
+    } else {
+      setMuteMenuOpen((v) => !v);
+    }
+  }
+
+  function applyMute(choice: '1h' | '3h' | 'forever') {
+    if (choice === 'forever') {
+      setMuteUntil('forever');
+    } else {
+      const hours = choice === '1h' ? 1 : 3;
+      setMuteUntil(Date.now() + hours * 60 * 60 * 1000);
+    }
+    tts.stop?.();
+    setMuteMenuOpen(false);
+  }
+
+  function muteLabel(): string {
+    if (!isMuted) return 'On';
+    if (muteUntil === 'forever') return 'Muted';
+    const remainingMin = Math.max(
+      0,
+      Math.round(((muteUntil as number) - Date.now()) / 60000),
+    );
+    if (remainingMin >= 60) {
+      const h = Math.floor(remainingMin / 60);
+      const m = remainingMin % 60;
+      return m === 0 ? `Muted ${h}h` : `Muted ${h}h ${m}m`;
+    }
+    return `Muted ${remainingMin}m`;
+  }
 
   // Seed TTS ref with last loaded message so history doesn't get spoken
   useEffect(() => {
@@ -173,23 +240,56 @@ export default function ChatPanel({
             <p className="text-[10px] text-gray-400">AI Documentation Assistant</p>
           </div>
         </div>
-        {/* Speaker toggle */}
-        <button
-          onClick={() => setAutoSpeak(!autoSpeak)}
-          className={`flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] transition-colors ${
-            autoSpeak ? 'text-indigo-600' : 'text-gray-400'
-          }`}
-          title={autoSpeak ? 'Auto-speak is on' : 'Auto-speak is off'}
-        >
-          <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            {autoSpeak ? (
-              <path strokeLinecap="round" strokeLinejoin="round" d="M19.114 5.636a9 9 0 0 1 0 12.728M16.463 8.288a5.25 5.25 0 0 1 0 7.424M6.75 8.25l4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.009 9.009 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z" />
-            ) : (
-              <path strokeLinecap="round" strokeLinejoin="round" d="M17.25 9.75 19.5 12m0 0 2.25 2.25M19.5 12l2.25-2.25M19.5 12l-2.25 2.25m-10.5-6 4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.009 9.009 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z" />
-            )}
-          </svg>
-          {autoSpeak ? 'On' : 'Off'}
-        </button>
+        {/* Speaker toggle + mute-duration menu */}
+        <div ref={muteMenuRef} className="relative">
+          <button
+            onClick={handleSpeakerClick}
+            className={`flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] transition-colors ${
+              autoSpeak ? 'text-indigo-600' : 'text-gray-400'
+            }`}
+            title={
+              isMuted
+                ? `${muteLabel()} — tap to unmute`
+                : 'Auto-speak is on — tap to mute'
+            }
+          >
+            <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              {autoSpeak ? (
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19.114 5.636a9 9 0 0 1 0 12.728M16.463 8.288a5.25 5.25 0 0 1 0 7.424M6.75 8.25l4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.009 9.009 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z" />
+              ) : (
+                <path strokeLinecap="round" strokeLinejoin="round" d="M17.25 9.75 19.5 12m0 0 2.25 2.25M19.5 12l2.25-2.25M19.5 12l-2.25 2.25m-10.5-6 4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.009 9.009 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z" />
+              )}
+            </svg>
+            {muteLabel()}
+          </button>
+
+          {muteMenuOpen && !isMuted && (
+            <div
+              role="menu"
+              className="absolute right-0 top-full z-20 mt-1 w-40 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg"
+            >
+              <p className="border-b border-gray-100 px-3 py-1.5 text-[10px] font-semibold tracking-widest text-gray-400 uppercase">
+                Mute Aria for
+              </p>
+              {(
+                [
+                  { value: '1h', label: '1 hour' },
+                  { value: '3h', label: '3 hours' },
+                  { value: 'forever', label: 'Until I unmute' },
+                ] as const
+              ).map((opt) => (
+                <button
+                  key={opt.value}
+                  role="menuitem"
+                  onClick={() => applyMute(opt.value)}
+                  className="block w-full px-3 py-2 text-left text-xs text-gray-700 transition-colors hover:bg-gray-50"
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Messages */}
