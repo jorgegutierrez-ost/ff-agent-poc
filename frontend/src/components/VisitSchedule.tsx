@@ -3,6 +3,11 @@ import type { Patient, ScheduleItem, SuctionEvent } from '../types';
 import type { PrnOrder, LoggedMed } from './VisitPage';
 import { fuzzyMatch } from '../lib/medicationMatch';
 import { buildMedLine } from '../lib/medicationFormat';
+import {
+  classifyScheduleItem,
+  findBaselineVitalsId,
+  isDueNow,
+} from '../lib/scheduleClassify';
 
 const ANIMATIONS_CSS = `
 @keyframes popIn {
@@ -26,7 +31,17 @@ interface VisitScheduleProps {
   prnOrders: PrnOrder[];
   loggedMeds: LoggedMed[];
   suctionEvents: SuctionEvent[];
+  seizureCount: number;
+  pendingChangeOrders: number;
+  headToToeDone: boolean;
   onQuickAction: (item: ScheduleItem, actionValue: string) => void;
+  /** Open one of the mid-shift quick-log forms (suction or seizure)
+   *  via a synthesized ScheduleItem so the existing form pipeline can
+   *  render them without needing a real scheduled task row. */
+  onQuickLog: (kind: 'suction' | 'seizure') => void;
+  /** "+ New change order" button — opens the change-order form with an
+   *  empty medication field for nurse-initiated new orders. */
+  onNewChangeOrder: () => void;
 }
 
 type Tab = 'schedule' | 'prn' | 'patient';
@@ -81,9 +96,14 @@ interface ScheduleCardProps {
   item: ScheduleItem;
   isOverdue?: boolean;
   onQuickAction: (item: ScheduleItem, actionValue: string) => void;
+  /** Full set of scheduled times for this medication today (HH:MM), for
+   *  the "All doses today: 8 AM, 2 PM, 8 PM" line on the card. Only
+   *  rendered for medications with 2+ scheduled times — singleton doses
+   *  already show their time in the corner of the card. */
+  allTimesToday?: string[];
 }
 
-function ScheduleCard({ item, isOverdue, onQuickAction }: ScheduleCardProps) {
+function ScheduleCard({ item, isOverdue, onQuickAction, allTimesToday }: ScheduleCardProps) {
   const isDone = item.status === 'completed' || item.status === 'skipped';
 
   // Medication cards: render "Give <dose> (<concentration>) · <route>" in
@@ -92,6 +112,13 @@ function ScheduleCard({ item, isOverdue, onQuickAction }: ScheduleCardProps) {
   const isMed = item.type === 'medication';
   const medLine = isMed ? buildMedLine(item.dose, item.concentration, item.route) : '';
   const subText = isMed ? medLine : item.sublabel;
+
+  // Pretty-print "All doses today: 8:00 AM, 2:00 PM, 8:00 PM". Only used
+  // when allTimesToday has 2+ entries — one-dose schedules already show
+  // the time in the corner of the card.
+  const allTimesPretty = isMed && allTimesToday && allTimesToday.length >= 2
+    ? allTimesToday.map(formatTime).join(', ')
+    : null;
 
   // Interventions render as a generic "things to do" — no scheduled time,
   // no overdue/late framing. Once completed, still show the completion
@@ -140,6 +167,43 @@ function ScheduleCard({ item, isOverdue, onQuickAction }: ScheduleCardProps) {
             <p className={`mt-0.5 text-xs transition-colors duration-300 ${isDone ? 'text-gray-300' : 'text-gray-400'}`}>
               {subText}
             </p>
+            {/* Extra administration details — only meds have these fields,
+                and we only render rows when the underlying value exists so
+                non-med items and sparser records stay compact. */}
+            {isMed && (
+              <div className={`mt-1 space-y-0.5 text-xs ${isDone ? 'text-gray-300' : 'text-gray-500'}`}>
+                {item.sublabel && (
+                  <p>
+                    <span className="font-medium text-gray-400">Frequency:</span>{' '}
+                    {item.sublabel}
+                  </p>
+                )}
+                {allTimesPretty && (
+                  <p>
+                    <span className="font-medium text-gray-400">All doses today:</span>{' '}
+                    {allTimesPretty}
+                  </p>
+                )}
+                {item.indication && (
+                  <p>
+                    <span className="font-medium text-gray-400">For:</span>{' '}
+                    {item.indication}
+                  </p>
+                )}
+                {item.instructions && (
+                  <p>
+                    <span className="font-medium text-gray-400">Instructions:</span>{' '}
+                    {item.instructions}
+                  </p>
+                )}
+                {item.isPrn && item.maxFrequencyHours != null && (
+                  <p>
+                    <span className="font-medium text-gray-400">Max frequency:</span>{' '}
+                    q{item.maxFrequencyHours}h
+                  </p>
+                )}
+              </div>
+            )}
           </div>
         </div>
         <div className="shrink-0 text-right">
@@ -279,52 +343,172 @@ const KIND_STYLES: Record<TimelineKind, { dot: string; label: string }> = {
 // upcoming sections still answer "what's still due?" while the new
 // Activity Timeline below answers "what already happened?". Per Renee's
 // feedback those are two different framings, so we keep them split.
+// One row inside the Check-in section. Compact, readable, with an
+// optional CTA pinned to the right for incomplete rows.
+function CheckInRow({
+  label,
+  sublabel,
+  done,
+  onAction,
+}: {
+  label: string;
+  sublabel: string;
+  done: boolean;
+  onAction?: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 px-4 py-3">
+      <div className="flex min-w-0 items-center gap-3">
+        <span
+          className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-white ${
+            done ? 'bg-emerald-500' : 'bg-gray-200 text-gray-500'
+          }`}
+        >
+          {done ? (
+            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+            </svg>
+          ) : (
+            <span className="text-[10px] font-semibold">…</span>
+          )}
+        </span>
+        <div className="min-w-0">
+          <p className={`text-sm font-medium ${done ? 'text-gray-500 line-through' : 'text-gray-900'}`}>
+            {label}
+          </p>
+          <p className="text-xs text-gray-500">{sublabel}</p>
+        </div>
+      </div>
+      {!done && onAction && (
+        <button
+          type="button"
+          onClick={onAction}
+          className="min-h-11 shrink-0 rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-800"
+        >
+          Start
+        </button>
+      )}
+    </div>
+  );
+}
+
 function ScheduleTab({
   items,
   suctionEvents,
   loggedMeds,
+  headToToeDone,
   onQuickAction,
+  onQuickLog,
 }: {
   items: ScheduleItem[];
   suctionEvents: SuctionEvent[];
   loggedMeds: LoggedMed[];
+  headToToeDone: boolean;
   onQuickAction: (item: ScheduleItem, actionValue: string) => void;
+  onQuickLog: (kind: 'suction' | 'seizure') => void;
 }) {
 
-  const { overdue, upcoming, completed } = useMemo(() => {
-    const ov: ScheduleItem[] = [];
-    const up: ScheduleItem[] = [];
-    const co: ScheduleItem[] = [];
+  const baselineVitalsId = useMemo(() => findBaselineVitalsId(items), [items]);
+
+  // Lifecycle buckets \u2014 what the nurse actually thinks in. Re-derived
+  // every render because `items` is small and the classifier is cheap.
+  const buckets = useMemo(() => {
+    const checkIn: ScheduleItem[] = [];
+    const recurring: ScheduleItem[] = [];
+    const scheduled: ScheduleItem[] = [];
+    const closing: ScheduleItem[] = [];
 
     for (const item of items) {
-      if (item.status === 'completed' || item.status === 'skipped') {
-        co.push(item);
-      } else if (item.status === 'overdue') {
-        ov.push(item);
-      } else {
-        up.push(item);
-      }
+      const cls = classifyScheduleItem(item, baselineVitalsId);
+      if      (cls === 'check_in')        checkIn.push(item);
+      else if (cls === 'recurring')       recurring.push(item);
+      else if (cls === 'narrative_close') closing.push(item);
+      else                                scheduled.push(item);
     }
+    return { checkIn, recurring, scheduled, closing };
+  }, [items, baselineVitalsId]);
 
-    return { overdue: ov, upcoming: up, completed: co };
-  }, [items]);
+  const now = new Date();
+  const nowMinutes = now.getHours() * 60 + now.getMinutes();
 
-  // Group upcoming by time period
-  const upcomingGroups = useMemo(() => {
+  // Within scheduled (meds + non-baseline vitals + narrative close):
+  //   Due now  = overdue OR \u226430 min away, and not yet completed.
+  //   Coming up = everything else still pending today.
+  //   Done     = completed / skipped, surfaced in the Activity Timeline.
+  const dueNow = useMemo(
+    () => [...buckets.scheduled, ...buckets.closing].filter((i) => isDueNow(i, nowMinutes)),
+    [buckets.scheduled, buckets.closing, nowMinutes],
+  );
+  const comingUp = useMemo(
+    () => [...buckets.scheduled, ...buckets.closing].filter(
+      (i) => !isDueNow(i, nowMinutes) && i.status !== 'completed' && i.status !== 'skipped',
+    ),
+    [buckets.scheduled, buckets.closing, nowMinutes],
+  );
+  const completed = useMemo(
+    () => items.filter((i) => i.status === 'completed' || i.status === 'skipped'),
+    [items],
+  );
+
+  // Group coming-up by time period for the collapsed view.
+  const comingUpGroups = useMemo(() => {
     const groups: Record<string, ScheduleItem[]> = {};
-    for (const item of upcoming) {
+    for (const item of comingUp) {
       const group = getTimeGroup(item.scheduledTime);
       if (!groups[group]) groups[group] = [];
       groups[group].push(item);
     }
     return groups;
-  }, [upcoming]);
+  }, [comingUp]);
 
   const groupIcons: Record<string, string> = {
     Morning: '\u2600\uFE0F',
     Afternoon: '\u26C5',
     Evening: '\uD83C\uDF19',
   };
+
+  // Recurring care: aggregate the per-label completion state so each
+  // recurring intervention shows as a single row with "X of Y done \u00B7
+  // last 14:30" instead of N separate scheduled cards. Tapping "Log
+  // now" opens the form for the next pending instance.
+  type RecurringSummary = {
+    label: string;
+    completed: number;
+    total: number;
+    lastCompletedAt: string | null;
+    nextPendingItem: ScheduleItem | null;
+    quickAction: string;
+  };
+  const recurringSummaries = useMemo<RecurringSummary[]>(() => {
+    const byLabel = new Map<string, ScheduleItem[]>();
+    for (const it of buckets.recurring) {
+      const key = it.label;
+      const arr = byLabel.get(key) ?? [];
+      arr.push(it);
+      byLabel.set(key, arr);
+    }
+    const out: RecurringSummary[] = [];
+    for (const [label, group] of byLabel) {
+      const sorted = [...group].sort((a, b) => a.scheduledTime.localeCompare(b.scheduledTime));
+      const done = sorted.filter((i) => i.status === 'completed');
+      const nextPending = sorted.find((i) => i.status !== 'completed' && i.status !== 'skipped') ?? null;
+      const lastCompletedAt = done.length > 0
+        ? done.map((i) => i.completedAt ?? i.scheduledTime).sort().at(-1) ?? null
+        : null;
+      const firstAction = nextPending?.quickActions[0]?.value ?? 'intervention_done';
+      out.push({
+        label,
+        completed: done.length,
+        total: sorted.length,
+        lastCompletedAt,
+        nextPendingItem: nextPending,
+        quickAction: firstAction,
+      });
+    }
+    // Sort so the most-incomplete bubbles to the top \u2014 that's the row
+    // the nurse most needs to act on.
+    return out.sort((a, b) => (a.completed - a.total) - (b.completed - b.total));
+  }, [buckets.recurring]);
 
   // Build the unified Activity Timeline: every event that already
   // happened during the visit, sorted by event time. Sources:
@@ -430,74 +614,229 @@ function ScheduleTab({
     return entries.sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
   }, [completed, suctionEvents, loggedMeds, items]);
 
+  // Per-drug map of every scheduled time today. Lets the card render
+  // "All doses today: 8 AM, 2 PM, 8 PM" without each card having to
+  // know about its siblings. Keyed by case-folded label so labels that
+  // differ only in casing still group.
+  const medTimesByLabel = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const it of items) {
+      if (it.type !== 'medication') continue;
+      const key = it.label.toLowerCase();
+      const arr = map.get(key) ?? [];
+      arr.push(it.scheduledTime);
+      map.set(key, arr);
+    }
+    for (const arr of map.values()) arr.sort();
+    return map;
+  }, [items]);
+
+  const timesFor = (item: ScheduleItem): string[] | undefined =>
+    item.type === 'medication' ? medTimesByLabel.get(item.label.toLowerCase()) : undefined;
+
+  // ── Check-in summary state ─────────────────────────────────────
+  // Three items: patient ID (always done by the time we render —
+  // the modal gated entry), head-to-toe, baseline vitals.
+  const baselineVitalsItem = useMemo(
+    () => items.find((i) => i.id === baselineVitalsId) ?? null,
+    [items, baselineVitalsId],
+  );
+  const baselineVitalsDone = baselineVitalsItem?.status === 'completed';
+  const headToToeItem = useMemo(
+    () => items.find((i) => i.type === 'head_to_toe') ?? null,
+    [items],
+  );
+  const checkInTotal = 3;
+  const checkInDone =
+    1 /* patient ID */ +
+    (headToToeDone ? 1 : 0) +
+    (baselineVitalsDone ? 1 : 0);
+  const checkInAllDone = checkInDone === checkInTotal;
+
   return (
     <>
-      {/* Overdue section */}
-      {overdue.length > 0 && (
-          <div className="mb-6">
-            <div className="mb-2 flex items-center gap-2">
-              <span className="inline-block h-2 w-2 rounded-full bg-red-500" />
-              <h3 className="text-[11px] font-semibold tracking-widest text-red-600 uppercase">
-                Overdue
-              </h3>
-            </div>
-            <div className="space-y-2">
-              {overdue.map((item) => (
-                <ScheduleCard
-                  key={item.id}
-                  item={item}
-                  isOverdue
-                  onQuickAction={onQuickAction}
-                />
-              ))}
-            </div>
+      {/* ─── CHECK-IN ────────────────────────────────────────────── */}
+      <details className="group mb-5 rounded-xl border border-gray-200 bg-white" open={!checkInAllDone}>
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3">
+          <div className="flex items-center gap-2">
+            <span className={`inline-block h-2 w-2 rounded-full ${checkInAllDone ? 'bg-emerald-500' : 'bg-indigo-500'}`} />
+            <span className="text-[11px] font-semibold tracking-widest text-gray-600 uppercase">
+              Check-in
+            </span>
+            <span className={`text-[11px] font-semibold ${checkInAllDone ? 'text-emerald-600' : 'text-gray-500'}`}>
+              {checkInDone}/{checkInTotal} {checkInAllDone ? '✓' : ''}
+            </span>
           </div>
-        )}
+          <svg className="h-4 w-4 text-gray-400 transition-transform group-open:rotate-180"
+               fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+          </svg>
+        </summary>
+        <div className="divide-y divide-gray-100 border-t border-gray-100">
+          {/* Patient ID (always present by the time this renders) */}
+          <CheckInRow label="Patient identification" done sublabel="Confirmed at visit start" />
+          {/* Head-to-toe */}
+          {headToToeItem && (
+            <CheckInRow
+              label="Head-to-toe assessment"
+              done={headToToeDone}
+              sublabel={headToToeDone ? 'Logged' : 'Tap to start'}
+              onAction={!headToToeDone ? () => onQuickAction(headToToeItem, 'do_head_to_toe') : undefined}
+            />
+          )}
+          {/* Baseline vitals */}
+          {baselineVitalsItem && (
+            <CheckInRow
+              label="Baseline vitals"
+              done={baselineVitalsDone}
+              sublabel={baselineVitalsDone ? `Recorded ${baselineVitalsItem.completedAt ?? ''}` : `Scheduled ${baselineVitalsItem.scheduledTime}`}
+              onAction={!baselineVitalsDone ? () => onQuickAction(baselineVitalsItem, 'record_vitals') : undefined}
+            />
+          )}
+        </div>
+      </details>
 
-        {/* Upcoming section */}
-        {upcoming.length > 0 && (
-          <div className="mb-6">
-            <div className="mb-3 flex items-center gap-2">
-              <span className="inline-block h-2 w-2 rounded-full bg-gray-900" />
-              <h3 className="text-[11px] font-semibold tracking-widest text-gray-400 uppercase">
-                Upcoming · Grouped by time
-              </h3>
-            </div>
-
-            {Object.entries(upcomingGroups).map(([group, groupItems]) => (
-              <div key={group} className="mb-4">
-                <div className="mb-2 flex items-center gap-1.5">
-                  <span className="text-xs">{groupIcons[group] ?? ''}</span>
-                  <span className="text-xs font-medium text-gray-500">
-                    {group} ({groupItems.length}{' '}
-                    {groupItems.length === 1 ? 'item' : 'items'})
-                  </span>
-                </div>
-                <div className="space-y-2">
-                  {groupItems.map((item) => (
-                    <ScheduleCard
-                      key={item.id}
-                      item={item}
-                      onQuickAction={onQuickAction}
-                    />
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-
-      {/* Activity Timeline — every event that already happened, in
-          chronological order. Replaces the old Completed list and the
-          separate Suction log. */}
-      {timelineEntries.length > 0 && (
-        <div className="mt-6">
-          <div className="mb-3 flex items-center gap-2">
-            <span className="inline-block h-2 w-2 rounded-full bg-emerald-500" />
-            <h3 className="text-[11px] font-semibold tracking-widest text-gray-400 uppercase">
-              Activity today ({timelineEntries.length})
+      {/* ─── DUE NOW ─────────────────────────────────────────────── */}
+      {dueNow.length > 0 && (
+        <div className="mb-5">
+          <div className="mb-2 flex items-center gap-2">
+            <span className="inline-block h-2 w-2 rounded-full bg-red-500" />
+            <h3 className="text-[11px] font-semibold tracking-widest text-red-600 uppercase">
+              Due now ({dueNow.length})
             </h3>
           </div>
+          <div className="space-y-2">
+            {dueNow.map((item) => (
+              <ScheduleCard
+                key={item.id}
+                item={item}
+                isOverdue={item.status === 'overdue'}
+                onQuickAction={onQuickAction}
+                allTimesToday={timesFor(item)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ─── COMING UP ────────────────────────────────────────────── */}
+      {comingUp.length > 0 && (
+        <details className="group mb-5" open={dueNow.length === 0}>
+          <summary className="mb-3 flex cursor-pointer list-none items-center gap-2">
+            <span className="inline-block h-2 w-2 rounded-full bg-gray-900" />
+            <h3 className="text-[11px] font-semibold tracking-widest text-gray-500 uppercase">
+              Coming up ({comingUp.length})
+            </h3>
+            <svg className="h-3.5 w-3.5 text-gray-400 transition-transform group-open:rotate-180"
+                 fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+            </svg>
+          </summary>
+
+          {Object.entries(comingUpGroups).map(([group, groupItems]) => (
+            <div key={group} className="mb-4">
+              <div className="mb-2 flex items-center gap-1.5">
+                <span className="text-xs">{groupIcons[group] ?? ''}</span>
+                <span className="text-xs font-medium text-gray-500">
+                  {group} ({groupItems.length}{' '}
+                  {groupItems.length === 1 ? 'item' : 'items'})
+                </span>
+              </div>
+              <div className="space-y-2">
+                {groupItems.map((item) => (
+                  <ScheduleCard
+                    key={item.id}
+                    item={item}
+                    onQuickAction={onQuickAction}
+                    allTimesToday={timesFor(item)}
+                  />
+                ))}
+              </div>
+            </div>
+          ))}
+        </details>
+      )}
+
+      {/* ─── RECURRING CARE ────────────────────────────────────────── */}
+      {(recurringSummaries.length > 0 || suctionEvents.length > 0) && (
+        <div className="mb-5">
+          <div className="mb-2 flex items-center gap-2">
+            <span className="inline-block h-2 w-2 rounded-full bg-violet-500" />
+            <h3 className="text-[11px] font-semibold tracking-widest text-gray-500 uppercase">
+              Recurring care ({recurringSummaries.length + (suctionEvents.length > 0 || items.some((i) => /suction/i.test(i.label)) ? 1 : 0)})
+            </h3>
+          </div>
+          <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
+            {recurringSummaries.map((r, idx) => {
+              const isSuction = /suction/i.test(r.label);
+              const lastTxt = r.lastCompletedAt ? ` · last ${r.lastCompletedAt}` : '';
+              return (
+                <div
+                  key={r.label}
+                  className={`flex items-center justify-between gap-3 px-4 py-3 ${idx !== 0 ? 'border-t border-gray-100' : ''}`}
+                >
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium text-gray-900">{r.label}</p>
+                    <p className="mt-0.5 text-xs text-gray-500">
+                      {r.completed} of {r.total} done{lastTxt}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (isSuction) onQuickLog('suction');
+                      else if (r.nextPendingItem) onQuickAction(r.nextPendingItem, r.quickAction);
+                    }}
+                    disabled={!isSuction && !r.nextPendingItem}
+                    className={`min-h-11 shrink-0 rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
+                      (!isSuction && !r.nextPendingItem)
+                        ? 'cursor-not-allowed bg-gray-100 text-gray-400'
+                        : 'bg-gray-900 text-white hover:bg-gray-800'
+                    }`}
+                  >
+                    {(!isSuction && !r.nextPendingItem) ? 'All done' : 'Log now'}
+                  </button>
+                </div>
+              );
+            })}
+            {/* Suction always shows even if no scheduled task exists for it. */}
+            {!recurringSummaries.some((r) => /suction/i.test(r.label)) && (
+              <div className={`flex items-center justify-between gap-3 px-4 py-3 ${recurringSummaries.length > 0 ? 'border-t border-gray-100' : ''}`}>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium text-gray-900">Suction</p>
+                  <p className="mt-0.5 text-xs text-gray-500">
+                    {suctionEvents.length} logged today
+                    {suctionEvents.length > 0
+                      ? ` · last ${formatTimeFromISO(suctionEvents[suctionEvents.length - 1].occurred_at)}`
+                      : ''}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onQuickLog('suction')}
+                  className="min-h-11 shrink-0 rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-800"
+                >
+                  Log now
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ─── ACTIVITY TODAY (collapsed) ──────────────────────────── */}
+      {timelineEntries.length > 0 && (
+        <details className="group mb-5">
+          <summary className="mb-2 flex cursor-pointer list-none items-center gap-2">
+            <span className="inline-block h-2 w-2 rounded-full bg-emerald-500" />
+            <h3 className="text-[11px] font-semibold tracking-widest text-gray-500 uppercase">
+              Activity today ({timelineEntries.length})
+            </h3>
+            <svg className="h-3.5 w-3.5 text-gray-400 transition-transform group-open:rotate-180"
+                 fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+            </svg>
+          </summary>
           <ol className="relative ml-1.5 border-l border-gray-200">
             {timelineEntries.map((e, i) => {
               const style = KIND_STYLES[e.kind];
@@ -507,7 +846,6 @@ function ScheduleTab({
                   key={e.id}
                   className={`relative ${isLast ? '' : 'pb-3'} pl-4`}
                 >
-                  {/* Dot — sits ON the rail, hence -left-[5px] to center */}
                   <span
                     className={`absolute -left-[5px] top-1 h-2.5 w-2.5 rounded-full ring-2 ring-white ${style.dot}`}
                   />
@@ -531,7 +869,7 @@ function ScheduleTab({
               );
             })}
           </ol>
-        </div>
+        </details>
       )}
     </>
   );
@@ -793,7 +1131,12 @@ export default function VisitSchedule({
   prnOrders,
   loggedMeds,
   suctionEvents,
+  seizureCount,
+  pendingChangeOrders,
+  headToToeDone,
   onQuickAction,
+  onQuickLog,
+  onNewChangeOrder,
 }: VisitScheduleProps) {
   const [tab, setTab] = useState<Tab>('schedule');
 
@@ -845,13 +1188,68 @@ export default function VisitSchedule({
         })}
       </nav>
 
+      {/* Quick-log strip — always visible. These events can happen
+          mid-shift on no notice (suction surge, breakthrough seizure),
+          so we surface one-tap buttons regardless of which tab is
+          active. Each shows the running count for the visit so the
+          nurse sees the tally without opening anything. */}
+      <div className="flex items-center gap-2 border-b border-gray-200 bg-white/60 px-6 py-2.5">
+        <span className="text-[10px] font-semibold tracking-widest text-gray-400 uppercase">
+          Quick log
+        </span>
+        <button
+          type="button"
+          onClick={() => onQuickLog('suction')}
+          className="flex items-center gap-1.5 rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1 text-xs font-medium text-cyan-900 transition-colors hover:bg-cyan-100"
+        >
+          <span className="inline-block h-1.5 w-1.5 rounded-full bg-cyan-500" />
+          Suction
+          {suctionEvents.length > 0 && (
+            <span className="rounded-full bg-cyan-700 px-1.5 text-[10px] font-semibold text-white">
+              {suctionEvents.length}
+            </span>
+          )}
+        </button>
+        <button
+          type="button"
+          onClick={() => onQuickLog('seizure')}
+          className="flex items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-xs font-medium text-rose-900 transition-colors hover:bg-rose-100"
+        >
+          <span className="inline-block h-1.5 w-1.5 rounded-full bg-rose-500" />
+          Seizure
+          {seizureCount > 0 && (
+            <span className="rounded-full bg-rose-700 px-1.5 text-[10px] font-semibold text-white">
+              {seizureCount}
+            </span>
+          )}
+        </button>
+        <button
+          type="button"
+          onClick={onNewChangeOrder}
+          className="ml-auto flex items-center gap-1.5 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-900 transition-colors hover:bg-indigo-100"
+          title="Submit a new medication change order"
+        >
+          <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+          </svg>
+          Change order
+          {pendingChangeOrders > 0 && (
+            <span className="rounded-full bg-indigo-700 px-1.5 text-[10px] font-semibold text-white">
+              {pendingChangeOrders}
+            </span>
+          )}
+        </button>
+      </div>
+
       <div className="flex-1 overflow-y-auto px-6 pb-4 pt-3">
         {tab === 'schedule' && (
           <ScheduleTab
             items={items}
             suctionEvents={suctionEvents}
             loggedMeds={loggedMeds}
+            headToToeDone={headToToeDone}
             onQuickAction={onQuickAction}
+            onQuickLog={onQuickLog}
           />
         )}
         {tab === 'prn' && (

@@ -40,8 +40,12 @@ const VISITS = [
     patient_id: '10000000-0000-0000-0000-000000000003',
     nurse_id: NURSE.id,
     visit_date: todayString(),
-    planned_start_time: '13:00',
-    planned_end_time: '14:00',
+    // 8-hour pediatric PDN day shift — realistic window for a private
+    // duty nurse on a long-term-care pediatric patient. Wide enough
+    // that TID/BID meds genuinely fall on multiple times of day so the
+    // "All doses today" line on the card has real data.
+    planned_start_time: '08:00',
+    planned_end_time: '16:00',
     service_type: 'RN Hourly',
     payer: 'Medicaid',
     status: 'in_progress',
@@ -84,22 +88,27 @@ export async function seed(): Promise<void> {
     [NURSE.id, NURSE.full_name, NURSE.credentials],
   );
 
-  // Patients
+  // Patients. Photo URL is a Dicebear avatar seeded on the patient's
+  // KanTime ID so the demo always renders the same illustrated face
+  // for Liam without us having to ship an actual image. Production
+  // would pull the real photo URL from KanTime.
   for (const p of PATIENTS) {
+    const photoUrl = `https://api.dicebear.com/7.x/personas/svg?seed=${encodeURIComponent(p.kantime_patient_id)}&backgroundColor=b6e3f4,c0aede,d1d4f9,ffd5dc,ffdfbf`;
     await pool.query(
       `INSERT INTO patients (
         id, kantime_patient_id, full_name, date_of_birth, age_months, age_years,
         allergies, primary_diagnosis, cpr_code, last_weight_lbs, last_height_inches,
         last_vitals_date, emergency_contact_name, emergency_contact_phone,
-        emergency_contact_relation
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-      ON CONFLICT (id) DO NOTHING`,
+        emergency_contact_relation, photo_url
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+      ON CONFLICT (id) DO UPDATE SET photo_url = EXCLUDED.photo_url`,
       [
         p.id, p.kantime_patient_id, p.full_name, p.date_of_birth,
         p.age_months, p.age_years, p.allergies, p.primary_diagnosis,
         p.cpr_code, p.last_weight_lbs, p.last_height_inches,
         p.last_vitals_date, p.emergency_contact_name,
         p.emergency_contact_phone, p.emergency_contact_relation,
+        photoUrl,
       ],
     );
   }
@@ -131,9 +140,40 @@ export async function seed(): Promise<void> {
   // (label = drug name; dose; concentration; route; indication; sublabel = frequency)
   // plus an optional `instructions` string for the expanded detail panel.
   // Instructions must reflect physician-entered orders only — never model-sourced.
+  // Realistic full-day plan for a pediatric LTC patient. The visit
+  // window covers 08:00–16:00; doses outside the window (evening +
+  // bedtime) are included so the "All doses today" card line shows
+  // the true daily schedule, even though the next-shift nurse or
+  // caregiver actually administers them.
+  const LIAM = '10000000-0000-0000-0000-000000000003';
+  const BACLOFEN_FIELDS = {
+    dose: '5 mg', concentration: '5 mg / 5 mL', route: 'Oral',
+    indication: 'Spasticity management',
+    instructions: 'Do not stop abruptly — risk of withdrawal seizures. Notify MD if any dose is missed.',
+  };
+  const DIAZEPAM_SCHED_FIELDS = {
+    dose: '2 mg', concentration: '5 mg / 5 mL', route: 'Oral',
+    indication: 'Muscle spasticity / seizure adjunct',
+    instructions: 'Monitor sedation level. Hold and notify MD if respiratory rate < 12.',
+  };
+  const LEVETIRACETAM_FIELDS = {
+    dose: '250 mg', concentration: '100 mg / mL', route: 'Oral',
+    indication: 'Seizure prophylaxis',
+    instructions: 'Give at consistent times approximately 12 hours apart.',
+  };
+  const GABAPENTIN_FIELDS = {
+    dose: '100 mg', concentration: '250 mg / 5 mL', route: 'Oral',
+    indication: 'Neuropathic pain',
+  };
+  const GLYCOPYRROLATE_FIELDS = {
+    dose: '1 mg', concentration: '1 mg / 5 mL', route: 'Oral',
+    indication: 'Hypersalivation control',
+    instructions: 'Give 30 minutes before meals. Monitor for dry mouth, constipation, urinary retention.',
+  };
+
   const SCHEDULED_TASKS: Array<{
     patient_id: string;
-    type: 'vitals' | 'medication' | 'intervention' | 'narrative';
+    type: 'vitals' | 'medication' | 'intervention' | 'narrative' | 'head_to_toe';
     label: string;
     sublabel: string;
     scheduled_time: string;
@@ -143,54 +183,82 @@ export async function seed(): Promise<void> {
     indication?: string;
     instructions?: string;
   }> = [
-    // ── Liam O'Brien (4yo, spastic quadriplegic cerebral palsy) ──
-    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'vitals',       label: 'Vital signs check',        sublabel: 'Temp, HR, RR, O2 sat, pain scale',     scheduled_time: '13:00' },
+    // 08:00 — head-to-toe assessment (regulatory: first event of the
+    // shift, blocks close-out). Scheduled at 07:55 so it sorts ahead of
+    // vitals/meds in the same minute bucket.
+    { patient_id: LIAM, type: 'head_to_toe', label: 'Head-to-toe assessment',
+      sublabel: '12 body systems · WDL or note exceptions', scheduled_time: '07:55' },
 
-    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'medication',
-      label: 'Baclofen',             sublabel: 'Three times daily',     scheduled_time: '13:10',
-      dose: '5 mg', concentration: '5 mg / 5 mL', route: 'Oral',
-      indication: 'Spasticity management',
-      instructions: 'Do not stop abruptly — risk of withdrawal seizures. Notify MD if any dose is missed.' },
-
-    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'medication',
-      label: 'Diazepam',             sublabel: 'Twice daily',           scheduled_time: '13:15',
-      dose: '2 mg', concentration: '5 mg / 5 mL', route: 'Oral',
-      indication: 'Muscle spasticity / seizure adjunct',
-      instructions: 'Monitor sedation level. Hold and notify MD if respiratory rate < 12.' },
-
-    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'medication',
-      label: 'Levetiracetam',        sublabel: 'Twice daily',           scheduled_time: '13:20',
-      dose: '250 mg', concentration: '100 mg / mL', route: 'Oral',
-      indication: 'Seizure prophylaxis',
-      instructions: 'Give at consistent times approximately 12 hours apart.' },
-
-    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'medication',
-      label: 'Gabapentin',           sublabel: 'Three times daily',     scheduled_time: '13:25',
-      dose: '100 mg', concentration: '250 mg / 5 mL', route: 'Oral',
-      indication: 'Neuropathic pain' },
-
-    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'intervention', label: 'Range of motion exercises',  sublabel: 'Upper and lower extremities',         scheduled_time: '13:30' },
-    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'intervention', label: 'Positioning and skin check', sublabel: 'Reposition · Assess pressure areas',  scheduled_time: '13:35' },
-
-    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'medication',
-      label: 'Polyethylene Glycol 3350', sublabel: 'Once daily',        scheduled_time: '13:40',
+    // 08:00 — start-of-shift vitals + morning med block
+    { patient_id: LIAM, type: 'vitals', label: 'Start-of-shift vitals',
+      sublabel: 'Temp, HR, RR, O2 sat, pain scale', scheduled_time: '08:00' },
+    { patient_id: LIAM, type: 'medication', label: 'Baclofen', sublabel: 'Three times daily',
+      scheduled_time: '08:00', ...BACLOFEN_FIELDS },
+    { patient_id: LIAM, type: 'medication', label: 'Diazepam', sublabel: 'Twice daily',
+      scheduled_time: '08:00', ...DIAZEPAM_SCHED_FIELDS },
+    { patient_id: LIAM, type: 'medication', label: 'Levetiracetam', sublabel: 'Twice daily',
+      scheduled_time: '08:00', ...LEVETIRACETAM_FIELDS },
+    { patient_id: LIAM, type: 'medication', label: 'Gabapentin', sublabel: 'Three times daily',
+      scheduled_time: '08:00', ...GABAPENTIN_FIELDS },
+    { patient_id: LIAM, type: 'medication', label: 'Polyethylene Glycol 3350', sublabel: 'Once daily',
+      scheduled_time: '08:00',
       dose: '8.5 g', concentration: '17 g per scoop', route: 'Oral',
       indication: 'Constipation prophylaxis',
       instructions: 'Mix in 4–8 oz of liquid; ensure full dose is consumed.' },
 
-    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'medication',
-      label: 'Glycopyrrolate',       sublabel: 'Three times daily',     scheduled_time: '13:45',
-      dose: '1 mg', concentration: '1 mg / 5 mL', route: 'Oral',
-      indication: 'Hypersalivation control',
-      instructions: 'Give 30 minutes before meals. Monitor for dry mouth, constipation, urinary retention.' },
+    // 09:00–10:00 — morning care
+    { patient_id: LIAM, type: 'intervention', label: 'Positioning and skin check',
+      sublabel: 'Reposition · Assess pressure areas', scheduled_time: '09:00' },
+    { patient_id: LIAM, type: 'intervention', label: 'Range of motion exercises',
+      sublabel: 'Upper and lower extremities', scheduled_time: '09:30' },
 
-    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'medication',
-      label: 'Melatonin',            sublabel: 'At bedtime',            scheduled_time: '13:50',
+    // 11:30 — pre-lunch Glycopyrrolate
+    { patient_id: LIAM, type: 'medication', label: 'Glycopyrrolate', sublabel: 'Three times daily',
+      scheduled_time: '11:30', ...GLYCOPYRROLATE_FIELDS },
+
+    // 12:00 — mid-shift vitals + repositioning
+    { patient_id: LIAM, type: 'vitals', label: 'Mid-shift vitals',
+      sublabel: 'Temp, HR, RR, O2 sat', scheduled_time: '12:00' },
+    { patient_id: LIAM, type: 'intervention', label: 'Positioning and skin check',
+      sublabel: 'Reposition · Assess pressure areas', scheduled_time: '13:00' },
+
+    // 14:00 — afternoon TID med block
+    { patient_id: LIAM, type: 'medication', label: 'Baclofen', sublabel: 'Three times daily',
+      scheduled_time: '14:00', ...BACLOFEN_FIELDS },
+    { patient_id: LIAM, type: 'medication', label: 'Gabapentin', sublabel: 'Three times daily',
+      scheduled_time: '14:00', ...GABAPENTIN_FIELDS },
+
+    // 15:00–15:30 — afternoon care
+    { patient_id: LIAM, type: 'intervention', label: 'Range of motion exercises',
+      sublabel: 'Upper and lower extremities', scheduled_time: '15:00' },
+    { patient_id: LIAM, type: 'intervention', label: 'Positioning and skin check',
+      sublabel: 'Reposition · Assess pressure areas', scheduled_time: '15:30' },
+
+    // 16:00 — end-of-shift vitals + narrative
+    { patient_id: LIAM, type: 'vitals', label: 'End-of-shift vitals',
+      sublabel: 'Repeat core vitals before sign-out', scheduled_time: '16:00' },
+    { patient_id: LIAM, type: 'narrative', label: 'Visit narrative',
+      sublabel: 'Document findings and plan', scheduled_time: '16:00' },
+
+    // 17:30 — pre-dinner Glycopyrrolate (covered by next shift / caregiver)
+    { patient_id: LIAM, type: 'medication', label: 'Glycopyrrolate', sublabel: 'Three times daily',
+      scheduled_time: '17:30', ...GLYCOPYRROLATE_FIELDS },
+
+    // 20:00 — evening med block (next shift)
+    { patient_id: LIAM, type: 'medication', label: 'Baclofen', sublabel: 'Three times daily',
+      scheduled_time: '20:00', ...BACLOFEN_FIELDS },
+    { patient_id: LIAM, type: 'medication', label: 'Diazepam', sublabel: 'Twice daily',
+      scheduled_time: '20:00', ...DIAZEPAM_SCHED_FIELDS },
+    { patient_id: LIAM, type: 'medication', label: 'Levetiracetam', sublabel: 'Twice daily',
+      scheduled_time: '20:00', ...LEVETIRACETAM_FIELDS },
+    { patient_id: LIAM, type: 'medication', label: 'Gabapentin', sublabel: 'Three times daily',
+      scheduled_time: '20:00', ...GABAPENTIN_FIELDS },
+
+    // 21:00 — bedtime
+    { patient_id: LIAM, type: 'medication', label: 'Melatonin', sublabel: 'At bedtime',
+      scheduled_time: '21:00',
       dose: '3 mg', concentration: '3 mg per chewable', route: 'Oral',
       indication: 'Sleep onset support' },
-
-    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'vitals',       label: 'End-of-shift vitals',       sublabel: 'Repeat core vitals before sign-out',   scheduled_time: '13:55' },
-    { patient_id: '10000000-0000-0000-0000-000000000003', type: 'narrative',    label: 'Visit narrative',           sublabel: 'Document findings and plan',           scheduled_time: '13:58' },
   ];
 
   // Reset scheduled tasks for these patients so the seed list is authoritative.
@@ -281,6 +349,110 @@ export async function seed(): Promise<void> {
     );
   }
 
+  // ── Pending order changes signed since last visit ─────────────────
+  // These are physician-signed orders that came through KanTime after
+  // the nurse's previous shift ended. Aria surfaces them in the opener
+  // so the nurse explicitly acknowledges each change before starting.
+  await pool.query(
+    `DELETE FROM pending_order_changes WHERE patient_id = $1`,
+    ['10000000-0000-0000-0000-000000000003'],
+  );
+  const PENDING_CHANGES = [
+    {
+      patient_id: '10000000-0000-0000-0000-000000000003',
+      change_type: 'modified',
+      medication: 'Baclofen',
+      details: 'Dose increased from 5 mg to 7.5 mg PO TID',
+      reason: 'Worsening spasticity per parent report',
+      signed_by: 'Dr. Patel',
+      // 2 days ago — recent enough that the nurse hasn't seen it yet.
+      signed_at_offset_days: 2,
+    },
+    {
+      patient_id: '10000000-0000-0000-0000-000000000003',
+      change_type: 'added',
+      medication: 'Vitamin D3',
+      details: 'New order: Vitamin D3 400 IU PO daily',
+      reason: 'Routine pediatric supplementation',
+      signed_by: 'Dr. Patel',
+      signed_at_offset_days: 1,
+    },
+    {
+      patient_id: '10000000-0000-0000-0000-000000000003',
+      change_type: 'discontinued',
+      medication: 'Melatonin',
+      details: 'Discontinued — sleep pattern stabilized',
+      reason: 'Family report of consistent sleep without supplementation',
+      signed_by: 'Dr. Patel',
+      signed_at_offset_days: 1,
+    },
+  ];
+  for (const c of PENDING_CHANGES) {
+    const signedAt = new Date();
+    signedAt.setDate(signedAt.getDate() - c.signed_at_offset_days);
+    await pool.query(
+      `INSERT INTO pending_order_changes
+         (patient_id, change_type, medication, details, reason, signed_by, signed_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [c.patient_id, c.change_type, c.medication, c.details, c.reason, c.signed_by, signedAt.toISOString()],
+    );
+  }
+
+  // ── Pre-mark the morning block (08:00-10:00) of TODAY's visit ──────
+  // Without this, every demo opens with 6 overdue items (08:00 vitals +
+  // 5 meds) and the nurse can't see what's actually due now. The morning
+  // block is realistically "already given" by the time the nurse takes
+  // over — either by a previous-shift nurse or by the parent caregiver.
+  // We wipe-and-reseed each run so the visit always starts at the same
+  // state regardless of prior demo activity.
+  const LIAM_VISIT = '20000000-0000-0000-0000-000000000003';
+  const VISIT_DATE = todayString();
+
+  for (const tbl of ['vital_signs', 'medications', 'interventions']) {
+    await pool.query(`DELETE FROM ${tbl} WHERE visit_id = $1`, [LIAM_VISIT]);
+  }
+
+  // 08:05 — start-of-shift vitals (realistic pediatric readings)
+  await pool.query(
+    `INSERT INTO vital_signs (
+       visit_id, bp_systolic, bp_diastolic, heart_rate,
+       respiratory_rate, temperature_f, o2_saturation,
+       weight_lbs, pain_score, occurred_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+    [LIAM_VISIT, 95, 55, 96, 22, 98.2, 98, 32.5, 1, `${VISIT_DATE}T08:05:00`],
+  );
+
+  // 08:10–08:20 — morning med block (all given on schedule)
+  const MORNING_MEDS: Array<{ name: string; dose: string; route: string; at: string }> = [
+    { name: 'Baclofen',                 dose: '5 mg',   route: 'Oral', at: '08:10' },
+    { name: 'Diazepam',                 dose: '2 mg',   route: 'Oral', at: '08:12' },
+    { name: 'Levetiracetam',            dose: '250 mg', route: 'Oral', at: '08:15' },
+    { name: 'Gabapentin',               dose: '100 mg', route: 'Oral', at: '08:18' },
+    { name: 'Polyethylene Glycol 3350', dose: '8.5 g',  route: 'Oral', at: '08:20' },
+  ];
+  for (const m of MORNING_MEDS) {
+    await pool.query(
+      `INSERT INTO medications (
+         visit_id, name, dose, route, given, administered_at
+       ) VALUES ($1,$2,$3,$4,$5,$6)`,
+      [LIAM_VISIT, m.name, m.dose, m.route, true, `${VISIT_DATE}T${m.at}:00`],
+    );
+  }
+
+  // 09:00 / 09:30 — morning care interventions
+  const MORNING_INTS: Array<{ name: string; description: string; outcome: string; at: string }> = [
+    { name: 'Positioning and skin check', description: 'Reposition · Assess pressure areas', outcome: 'Skin intact; no pressure areas', at: '09:00' },
+    { name: 'Range of motion exercises',  description: 'Upper and lower extremities',         outcome: 'Tolerated well; mild grimace right hip', at: '09:30' },
+  ];
+  for (const it of MORNING_INTS) {
+    await pool.query(
+      `INSERT INTO interventions (
+         visit_id, name, description, outcome, occurred_at
+       ) VALUES ($1,$2,$3,$4,$5)`,
+      [LIAM_VISIT, it.name, it.description, it.outcome, `${VISIT_DATE}T${it.at}:00`],
+    );
+  }
+
   // ── Past 30 days of completed visits ──────────────────────────────
   // Backfills realistic visit history (vitals, meds, interventions,
   // narrative) for Liam so the Past Visits search and the in-visit
@@ -333,13 +505,17 @@ const LIAM_NARRATIVES = [
 
 interface MedTemplate { name: string; dose: string; route: string; addMin: number; }
 
+// addMin offsets are relative to a past visit's planned_start_time
+// (08:00). Spread across the 8-hour shift so the historical record
+// looks like a real day — morning meds in the first hour, glycopyrrolate
+// pre-lunch, afternoon TID dose at +6h.
 const LIAM_MEDS: MedTemplate[] = [
-  { name: 'Baclofen',                 dose: '5 mg',   route: 'Oral', addMin: 10 },
-  { name: 'Diazepam',                 dose: '2 mg',   route: 'Oral', addMin: 15 },
-  { name: 'Levetiracetam',            dose: '250 mg', route: 'Oral', addMin: 20 },
-  { name: 'Gabapentin',               dose: '100 mg', route: 'Oral', addMin: 25 },
-  { name: 'Polyethylene Glycol 3350', dose: '8.5 g',  route: 'Oral', addMin: 40 },
-  { name: 'Glycopyrrolate',           dose: '1 mg',   route: 'Oral', addMin: 45 },
+  { name: 'Baclofen',                 dose: '5 mg',   route: 'Oral', addMin: 10  }, // 08:10
+  { name: 'Diazepam',                 dose: '2 mg',   route: 'Oral', addMin: 15  }, // 08:15
+  { name: 'Levetiracetam',            dose: '250 mg', route: 'Oral', addMin: 20  }, // 08:20
+  { name: 'Gabapentin',               dose: '100 mg', route: 'Oral', addMin: 25  }, // 08:25
+  { name: 'Polyethylene Glycol 3350', dose: '8.5 g',  route: 'Oral', addMin: 30  }, // 08:30
+  { name: 'Glycopyrrolate',           dose: '1 mg',   route: 'Oral', addMin: 210 }, // 11:30 (pre-lunch)
 ];
 
 interface InterventionTemplate { name: string; description: string; outcome: string; }
@@ -376,6 +552,9 @@ function liamVitals(dayOffset: number): PastVitals {
 }
 
 interface PrnAdmin { name: string; dose: string; route: string; addMin: number; }
+// addMin offsets are relative to past visit start (08:00). Spread the
+// PRN admins across the shift so the historical timeline tells a real
+// story instead of clustering everything in the first hour.
 
 // PRN admins paired with narratives that already mention them — keeps the
 // past-visits view internally consistent and gives the recap card a real
@@ -383,17 +562,20 @@ interface PrnAdmin { name: string; dose: string; route: string; addMin: number; 
 function prnAdminsFor(narrativeIdx: number): PrnAdmin[] {
   if (narrativeIdx === 0) {
     // "Mother reports a seizure-like episode last night" + Diazepam PRN
-    return [{ name: 'Diazepam', dose: '2 mg', route: 'Oral', addMin: 33 }];
+    // — patient breakthrough event mid-morning at ~10:00
+    return [{ name: 'Diazepam', dose: '2 mg', route: 'Oral', addMin: 120 }];
   }
   if (narrativeIdx === 1) {
     // "Pain rating 4/10 ... Acetaminophen PRN given"
-    return [{ name: 'Acetaminophen', dose: '240 mg (7.5 mL)', route: 'Oral', addMin: 31 }];
+    // — pain noted before lunch, treated ~11:30
+    return [{ name: 'Acetaminophen', dose: '240 mg (7.5 mL)', route: 'Oral', addMin: 210 }];
   }
   if (narrativeIdx === 2) {
     // "Two brief seizure episodes ... Diazepam PRN given after second event"
+    // — first ~10:00, second ~14:00 (rare but realistic for the worst-shift narrative)
     return [
-      { name: 'Diazepam', dose: '2 mg', route: 'Oral', addMin: 28 },
-      { name: 'Diazepam', dose: '2 mg', route: 'Oral', addMin: 38 },
+      { name: 'Diazepam', dose: '2 mg', route: 'Oral', addMin: 120 },
+      { name: 'Diazepam', dose: '2 mg', route: 'Oral', addMin: 360 },
     ];
   }
   return [];
@@ -412,8 +594,10 @@ async function seedPastVisits(): Promise<void> {
   for (let dayOffset = 1; dayOffset <= PAST_DAYS; dayOffset++) {
     const vId = pastVisitId(dayOffset);
     const visitDate = dateMinus(dayOffset);
-    const start = '13:00';
-    const end   = '14:00';
+    // Past visits use the same 8-hour PDN day-shift window as today's
+    // visit so the historical record reads consistently.
+    const start = '08:00';
+    const end   = '16:00';
     const narrativeIdx = (dayOffset - 1) % 7;
 
     await pool.query(
@@ -476,16 +660,18 @@ async function seedPastVisits(): Promise<void> {
       );
     }
 
-    // Interventions (1-2 per visit)
+    // Interventions (1-2 per visit) spread across the shift —
+    // ROM mid-morning at ~09:30, repositioning ~13:30.
     const ints = LIAM_INTERVENTIONS;
     const intCount = Math.min((dayOffset % 3) + 1, ints.length);
+    const intOffsets = [90, 330]; // minutes after 08:00 start
     for (let i = 0; i < intCount; i++) {
       const it = ints[i];
       await pool.query(
         `INSERT INTO interventions (
            visit_id, name, description, outcome, occurred_at
          ) VALUES ($1,$2,$3,$4,$5)`,
-        [vId, it.name, it.description, it.outcome, `${visitDate}T${shiftTime(start, 30 + i * 10)}:00`],
+        [vId, it.name, it.description, it.outcome, `${visitDate}T${shiftTime(start, intOffsets[i] ?? 90)}:00`],
       );
     }
 

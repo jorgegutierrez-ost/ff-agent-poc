@@ -8,11 +8,16 @@ import {
   NarrativeForm,
   SkipForm,
   SuctionForm,
+  SeizureForm,
+  ChangeOrderForm,
 } from './ActionForms';
+import HeadToToeForm from './HeadToToeForm';
 import { useAudioRecorder, formatDuration } from '../hooks/useAudioRecorder';
 import { useAudioPlayer } from '../hooks/useAudioPlayer';
 
 interface ChatPanelProps {
+  patientId: string;
+  visitId: string;
   messages: ChatMessage[];
   isStreaming: boolean;
   activeToolCall: string | null;
@@ -36,7 +41,16 @@ function formatMessageTime(date: Date): string {
   });
 }
 
+// Quiet hours: 21:00 (9 PM) to 07:00 (7 AM). The window wraps midnight,
+// so we check both halves of the comparison.
+function isInQuietHours(d: Date): boolean {
+  const h = d.getHours();
+  return h >= 21 || h < 7;
+}
+
 export default function ChatPanel({
+  patientId,
+  visitId,
   messages,
   isStreaming,
   activeToolCall,
@@ -53,14 +67,57 @@ export default function ChatPanel({
   const recorder = useAudioRecorder(onSendMessage);
   const tts = useAudioPlayer();
 
+  // Compact-layout state: at widths below the breakpoint (tablet
+  // portrait, narrow laptops) the chat collapses to a floating mic
+  // button bottom-right and slides up as an overlay when tapped. The
+  // full dashboard takes the visit canvas instead of fighting for 33%.
+  const COMPACT_BREAKPOINT_PX = 900;
+  const [isCompact, setIsCompact] = useState<boolean>(
+    typeof window !== 'undefined' ? window.innerWidth < COMPACT_BREAKPOINT_PX : false,
+  );
+  const [chatOpen, setChatOpen] = useState(false);
+  useEffect(() => {
+    const onResize = () => setIsCompact(window.innerWidth < COMPACT_BREAKPOINT_PX);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  // Auto-open the drawer when Aria is streaming or a form is active —
+  // those are events the nurse needs to see immediately.
+  useEffect(() => {
+    if (isCompact && (isStreaming || activeForm)) setChatOpen(true);
+  }, [isCompact, isStreaming, activeForm]);
+
   // Mute deadline: null = not muted, 'forever' = until manually unmuted,
   // number = ms-since-epoch when the mute auto-expires.
   const [muteUntil, setMuteUntil] = useState<number | 'forever' | null>(null);
   const [muteMenuOpen, setMuteMenuOpen] = useState(false);
   const muteMenuRef = useRef<HTMLDivElement>(null);
-  const isMuted =
+
+  // Quiet hours: auto-mute between 21:00 and 07:00 local time so Aria
+  // doesn't speak in the family's home overnight. The nurse can override
+  // by tapping the speaker — the override clears automatically the next
+  // time we leave quiet hours, so tomorrow's overnight is muted again.
+  const [overrideQuiet, setOverrideQuiet] = useState(false);
+  // Tick state forces a re-render once a minute so the quiet-hours
+  // boundary fires without waiting for an unrelated state change.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setTick((t) => t + 1), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
+  const inQuietHours = isInQuietHours(new Date());
+
+  // When quiet hours end, drop the override so tomorrow night is muted
+  // again by default.
+  useEffect(() => {
+    if (!inQuietHours && overrideQuiet) setOverrideQuiet(false);
+  }, [inQuietHours, overrideQuiet]);
+
+  const isManualMuted =
     muteUntil === 'forever' ||
     (typeof muteUntil === 'number' && muteUntil > Date.now());
+  const isQuietMuted = inQuietHours && !overrideQuiet;
+  const isMuted = isManualMuted || isQuietMuted;
   const autoSpeak = !isMuted;
   const lastSpokenIdRef = useRef<string | null>(lastLoadedMsgId);
 
@@ -89,12 +146,19 @@ export default function ChatPanel({
   }, [muteMenuOpen]);
 
   function handleSpeakerClick() {
-    if (isMuted) {
+    if (isQuietMuted) {
+      // Override quiet hours for this window. Auto-clears when the
+      // clock rolls past 07:00.
+      setOverrideQuiet(true);
+      setMuteMenuOpen(false);
+      return;
+    }
+    if (isManualMuted) {
       setMuteUntil(null);
       setMuteMenuOpen(false);
-    } else {
-      setMuteMenuOpen((v) => !v);
+      return;
     }
+    setMuteMenuOpen((v) => !v);
   }
 
   function applyMute(choice: '1h' | '3h' | 'forever') {
@@ -109,6 +173,7 @@ export default function ChatPanel({
   }
 
   function muteLabel(): string {
+    if (isQuietMuted) return 'Quiet hours';
     if (!isMuted) return 'On';
     if (muteUntil === 'forever') return 'Muted';
     const remainingMin = Math.max(
@@ -185,16 +250,47 @@ export default function ChatPanel({
     const { item, actionValue } = activeForm;
 
     if (actionValue === 'record_vitals') {
-      return <VitalsForm item={item} onSubmit={onFormSubmit} onCancel={onFormCancel} />;
+      return <VitalsForm item={item} patientId={patientId} onSubmit={onFormSubmit} onCancel={onFormCancel} />;
     }
     if (actionValue === 'skip_vitals') {
       return <SkipForm item={item} label="Vital signs" onSubmit={onFormSubmit} onCancel={onFormCancel} />;
     }
-    if (actionValue === 'med_given' || actionValue === 'med_skipped' || actionValue === 'med_modified') {
+    if (actionValue === 'med_given' || actionValue === 'med_skipped') {
       return (
         <MedicationForm
           item={item}
-          action={actionValue as 'med_given' | 'med_skipped' | 'med_modified'}
+          action={actionValue as 'med_given' | 'med_skipped'}
+          onSubmit={onFormSubmit}
+          onCancel={onFormCancel}
+        />
+      );
+    }
+    if (actionValue === 'change_order' || actionValue === 'change_order_new') {
+      return (
+        <ChangeOrderForm
+          item={item}
+          visitId={visitId}
+          isHeaderInitiated={actionValue === 'change_order_new'}
+          onSubmit={onFormSubmit}
+          onCancel={onFormCancel}
+        />
+      );
+    }
+    if (actionValue === 'do_head_to_toe') {
+      return (
+        <HeadToToeForm
+          item={item}
+          visitId={visitId}
+          onSubmit={onFormSubmit}
+          onCancel={onFormCancel}
+        />
+      );
+    }
+    if (actionValue === 'log_seizure') {
+      return (
+        <SeizureForm
+          item={item}
+          visitId={visitId}
           onSubmit={onFormSubmit}
           onCancel={onFormCancel}
         />
@@ -225,11 +321,51 @@ export default function ChatPanel({
     return null;
   }
 
+  // When compact, render a floating FAB + an overlay drawer instead
+  // of inlining the panel. Returns nothing in flow-layout so the
+  // sibling schedule view can take the entire row width.
+  if (isCompact && !chatOpen) {
+    return (
+      <button
+        type="button"
+        onClick={() => setChatOpen(true)}
+        aria-label="Open Aria chat"
+        className="fixed bottom-5 right-5 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-gray-900 text-white shadow-lg ring-4 ring-white transition-transform hover:scale-105"
+      >
+        <img src="/aria-avatar.png" alt="" className="h-10 w-10 rounded-full object-cover" />
+        {isStreaming && (
+          <span className="absolute -top-1 -right-1 flex h-3 w-3">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-indigo-400 opacity-75" />
+            <span className="relative inline-flex h-3 w-3 rounded-full bg-indigo-500" />
+          </span>
+        )}
+      </button>
+    );
+  }
+
   return (
-    <div className="flex h-full w-[70%] shrink-0 flex-col border-l border-gray-200 bg-white">
+    <div
+      className={
+        isCompact
+          ? 'fixed inset-x-0 bottom-0 z-40 flex h-[85vh] flex-col rounded-t-2xl border-t border-gray-200 bg-white shadow-2xl'
+          : 'flex h-full w-1/3 shrink-0 flex-col border-l border-gray-200 bg-white'
+      }
+    >
       {/* Header */}
       <div className="flex items-center justify-between border-b border-gray-200 px-5 py-3">
         <div className="flex items-center gap-2.5">
+          {isCompact && (
+            <button
+              type="button"
+              onClick={() => setChatOpen(false)}
+              aria-label="Close Aria"
+              className="mr-1 flex h-8 w-8 items-center justify-center rounded-full text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+            >
+              <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+              </svg>
+            </button>
+          )}
           <img
             src="/aria-avatar.png"
             alt="Aria"
@@ -248,9 +384,11 @@ export default function ChatPanel({
               autoSpeak ? 'text-indigo-600' : 'text-gray-400'
             }`}
             title={
-              isMuted
-                ? `${muteLabel()} — tap to unmute`
-                : 'Auto-speak is on — tap to mute'
+              isQuietMuted
+                ? 'Quiet hours (9 PM – 7 AM) — tap to override for tonight'
+                : isMuted
+                  ? `${muteLabel()} — tap to unmute`
+                  : 'Auto-speak is on — tap to mute'
             }
           >
             <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>

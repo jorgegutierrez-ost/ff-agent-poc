@@ -4,9 +4,13 @@ import {
   saveIntervention,
   saveMedication,
   saveSuctionEvent,
+  saveSeizureEvent,
   upsertNarrative,
   searchPatientHistory,
+  saveHeadToToe,
+  type HeadToToeSystemFinding,
 } from '../db/queries';
+import { HEAD_TO_TOE_SYSTEM_IDS } from './headToToeSystems';
 
 export const TOOL_DEFINITIONS: Tool[] = [
   {
@@ -199,6 +203,95 @@ export const TOOL_DEFINITIONS: Tool[] = [
     },
   },
   {
+    name: 'log_seizure',
+    description:
+      'Log a seizure event during the visit. Mirrors the KanTime ' +
+      'seizure log: time, duration, type, LOC, intervention, free-text ' +
+      'notes. Mid-shift triggerable — call this as soon as the nurse ' +
+      'describes a seizure event, even if no scheduled task is in play.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        visit_id: { type: 'string' },
+        occurred_at: {
+          type: 'string',
+          description: 'When the seizure started. Accept HH:MM or full ISO.',
+        },
+        duration_seconds: {
+          type: 'number',
+          description:
+            'How long the seizure lasted in SECONDS. Convert from the ' +
+            'nurse\'s phrasing — "about 30 seconds" → 30, "two minutes" → 120.',
+        },
+        seizure_type: {
+          type: 'string',
+          description:
+            "KanTime type. One of: 'Absence', 'Atonic', 'Autonomic', " +
+            "'Clonic', 'Emotional', 'Myoclonic', 'Sensory', 'Tonic', " +
+            "'Tonic-Clonic'. Use 'Other' (free text) if the nurse " +
+            "describes activity that doesn't map cleanly.",
+        },
+        loc: {
+          type: 'string',
+          enum: ['alert', 'oriented', 'lethargic'],
+          description:
+            "Level of consciousness immediately after the event. " +
+            "Default to 'alert' only if the nurse explicitly says so.",
+        },
+        intervention: {
+          type: 'string',
+          description:
+            'What the nurse did — e.g. "positioned on side, suctioned, ' +
+            'gave PRN Diazepam, monitored airway".',
+        },
+        notes: {
+          type: 'string',
+          description: 'Free-text observations (witnessed activity, triggers, post-ictal state).',
+        },
+      },
+      required: ['visit_id', 'occurred_at'],
+    },
+  },
+  {
+    name: 'log_head_to_toe',
+    description:
+      "Save the head-to-toe body-systems assessment for the visit. " +
+      "This is the FIRST mandatory event of every shift — the nurse " +
+      "cannot close out without it. Each of the 12 systems must be " +
+      "either marked WDL (within defined limits) or have at least one " +
+      "exception flag + a short note. Accept the nurse's natural " +
+      "phrasing — \"neuro normal, cardiac normal, abdomen distended\" " +
+      "→ neuro.wdl=true, cv.wdl=true, gi.wdl=false with " +
+      "exception 'Abdomen distended'. If the nurse says \"all systems " +
+      "WDL\" or \"no exceptions\", mark every system wdl=true.",
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        visit_id: { type: 'string' },
+        mode: {
+          type: 'string',
+          enum: ['wdl', 'checklist'],
+          description: "Form variant. Default to 'wdl' unless the nurse explicitly works through the FL-style checklist.",
+        },
+        systems: {
+          type: 'object' as const,
+          description:
+            "Per-system findings keyed by system id. Allowed ids: " +
+            HEAD_TO_TOE_SYSTEM_IDS.join(', ') + ". " +
+            "Each value is { wdl: boolean, exceptions: string[], notes: string }. " +
+            "Exception strings should come from the canonical list shown " +
+            "in the form context — free text is OK but pick the canonical " +
+            "label when one fits.",
+        },
+        summary_notes: {
+          type: 'string',
+          description: "Optional short narrative summarizing the overall assessment.",
+        },
+      },
+      required: ['visit_id', 'systems'],
+    },
+  },
+  {
     name: 'update_narrative',
     description: 'Update the visit narrative with the information collected so far',
     input_schema: {
@@ -237,6 +330,37 @@ export async function executeToolCall(
       }
       case 'log_suction': {
         const row = await saveSuctionEvent(visitId, input);
+        return { success: true, id: row.id };
+      }
+      case 'log_seizure': {
+        const row = await saveSeizureEvent(visitId, input);
+        return { success: true, id: row.id };
+      }
+      case 'log_head_to_toe': {
+        const mode = input.mode === 'checklist' ? 'checklist' : 'wdl';
+        const rawSystems = (input.systems && typeof input.systems === 'object')
+          ? (input.systems as Record<string, unknown>)
+          : {};
+        const knownIds = new Set(HEAD_TO_TOE_SYSTEM_IDS);
+        const systems: Record<string, HeadToToeSystemFinding> = {};
+        for (const [id, val] of Object.entries(rawSystems)) {
+          if (!knownIds.has(id) || !val || typeof val !== 'object') continue;
+          const v = val as Record<string, unknown>;
+          systems[id] = {
+            wdl: v.wdl === true,
+            exceptions: Array.isArray(v.exceptions)
+              ? (v.exceptions as unknown[]).filter((x): x is string => typeof x === 'string')
+              : [],
+            notes: typeof v.notes === 'string' ? v.notes : '',
+          };
+        }
+        if (Object.keys(systems).length === 0) {
+          return { success: false, error: 'At least one system finding is required.' };
+        }
+        const summaryNotes = typeof input.summary_notes === 'string' && input.summary_notes.trim()
+          ? input.summary_notes.trim()
+          : null;
+        const row = await saveHeadToToe(visitId, mode, systems, summaryNotes);
         return { success: true, id: row.id };
       }
       case 'update_narrative': {

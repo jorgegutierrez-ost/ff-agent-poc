@@ -3,6 +3,13 @@ import type { Patient, Visit } from '../types';
 import { API_BASE } from './../config';
 import { fuzzyMatch } from '../lib/medicationMatch';
 import { buildMedLine } from '../lib/medicationFormat';
+import {
+  type Highlight,
+  buildResume,
+  filterLastDays,
+  highlightClause,
+  relativeDay,
+} from '../lib/recapHighlights';
 
 interface PatientDetailSidebarProps {
   patient: Patient;
@@ -128,6 +135,10 @@ export default function PatientDetailSidebar({
   const [loggedMeds, setLoggedMeds] = useState<LoggedMedication[]>([]);
   const [prnOrders, setPrnOrders] = useState<PrnOrder[]>([]);
   const [prnExpanded, setPrnExpanded] = useState(false);
+  const [recentBrief, setRecentBrief] = useState<{
+    highlights: Highlight[];
+    visitsScanned: number;
+  } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -141,18 +152,39 @@ export default function PatientDetailSidebar({
       fetch(`${API_BASE}/api/patients/${patient.id}/prn-orders`).then((r) =>
         r.ok ? r.json() : [],
       ),
+      fetch(`${API_BASE}/api/patients/${patient.id}/recent-brief`).then((r) =>
+        r.ok ? r.json() : { highlights: [], visitsScanned: 0 },
+      ),
     ])
-      .then(([schedule, summary, prn]) => {
+      .then(([schedule, summary, prn, brief]) => {
         if (cancelled) return;
         setTasks(schedule as ScheduledTask[]);
         setLoggedMeds((summary?.medications ?? []) as LoggedMedication[]);
         setPrnOrders(prn as PrnOrder[]);
+        setRecentBrief({
+          highlights: (brief?.highlights ?? []) as Highlight[],
+          visitsScanned: brief?.visitsScanned ?? 0,
+        });
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
   }, [visit.id, patient.id]);
+
+  // Sidebar's "Last 3 days" recap: deterministic, drawn from the same
+  // /recent-brief endpoint Aria uses. Filter the (default 14-day) brief
+  // down to entries within the last 3 days only.
+  const last3Days = useMemo(() => {
+    if (!recentBrief) return null;
+    const filtered = filterLastDays(recentBrief.highlights, 3);
+    return { highlights: filtered, visitsScanned: recentBrief.visitsScanned };
+  }, [recentBrief]);
+
+  const last3DaysResume = useMemo(() => {
+    if (!last3Days || last3Days.highlights.length === 0) return null;
+    return buildResume(last3Days.highlights, last3Days.visitsScanned);
+  }, [last3Days]);
 
   // ── Derived values ──────────────────────────────────────────────────────
   const totalTasks = tasks.length;
@@ -545,6 +577,49 @@ export default function PatientDetailSidebar({
           </h3>
           <p className="text-sm text-gray-900">{patient.primary_diagnosis}</p>
         </div>
+
+        {/* ── 7b. Last 3 days recap ── */}
+        {last3Days && (
+          <div className="px-6 pb-4">
+            <h3 className="mb-1.5 text-[11px] font-semibold tracking-widest text-gray-400 uppercase">
+              Last 3 days
+            </h3>
+            {last3Days.highlights.length === 0 ? (
+              <div className="rounded-2xl border border-gray-200 bg-white px-4 py-3">
+                <p className="text-sm text-gray-500">
+                  Nothing flagged in the last 3 days.
+                </p>
+              </div>
+            ) : (
+              <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white">
+                {last3DaysResume && (
+                  <div className="border-b border-gray-100 px-4 py-3">
+                    <p className="text-sm leading-snug text-gray-800">
+                      {last3DaysResume.sentence}
+                    </p>
+                    <p className="mt-1 text-[11px] text-gray-400">
+                      {last3DaysResume.counts}
+                    </p>
+                  </div>
+                )}
+                <ul className="divide-y divide-gray-100">
+                  {last3Days.highlights.map((h, i) => (
+                    <li key={i} className="px-4 py-2">
+                      <div className="flex items-baseline justify-between gap-3">
+                        <span className="text-sm text-gray-900">
+                          {highlightClause(h)}
+                        </span>
+                        <span className="shrink-0 text-[11px] tabular-nums text-gray-400">
+                          {relativeDay(h.visitDate)}
+                        </span>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* ── 9b. PRN orders (as-needed standing orders) ── */}
         {prnOrders.length > 0 && (

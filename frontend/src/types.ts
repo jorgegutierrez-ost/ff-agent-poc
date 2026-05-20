@@ -14,6 +14,7 @@ export interface Patient {
   emergency_contact_name: string;
   emergency_contact_phone: string;
   emergency_contact_relation: string;
+  photo_url?: string | null;
 }
 
 export interface Visit {
@@ -87,6 +88,20 @@ export interface SuctionEvent {
   recorded_at: string;
 }
 
+export type SeizureLOC = 'alert' | 'oriented' | 'lethargic';
+
+export interface SeizureEvent {
+  id: string;
+  visit_id: string;
+  occurred_at: string;
+  duration_seconds: number | null;
+  seizure_type: string | null;
+  loc: SeizureLOC | null;
+  intervention: string | null;
+  notes: string | null;
+  recorded_at: string;
+}
+
 export interface VisitSummaryData {
   vitals: VitalsData | null;
   interventions: InterventionData[];
@@ -95,7 +110,7 @@ export interface VisitSummaryData {
 }
 
 // Schedule items for the visit timeline
-export type ScheduleItemType = 'medication' | 'intervention' | 'vitals' | 'narrative';
+export type ScheduleItemType = 'medication' | 'intervention' | 'vitals' | 'narrative' | 'head_to_toe';
 export type ScheduleItemStatus = 'overdue' | 'pending' | 'completed' | 'skipped';
 
 export interface ScheduleItem {

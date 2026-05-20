@@ -5,6 +5,9 @@ import {
   buildSystemPrompt,
   type ScheduledTaskForPrompt,
   type PrnOrderForPrompt,
+  type PendingOrderChangeForPrompt,
+  type HeadToToeStatus,
+  type ActiveChangeOrderForPrompt,
 } from './systemPrompt';
 import { TOOL_DEFINITIONS, executeToolCall } from './tools';
 import { saveMessage } from '../db/queries';
@@ -196,6 +199,9 @@ export async function runAgentLoop(
   scheduledTasks: ScheduledTaskForPrompt[] = [],
   prnOrders: PrnOrderForPrompt[] = [],
   recentHighlights = '',
+  pendingChanges: PendingOrderChangeForPrompt[] = [],
+  headToToe: HeadToToeStatus | null = null,
+  activeChangeOrders: ActiveChangeOrderForPrompt[] = [],
 ): Promise<void> {
   const systemPrompt = buildSystemPrompt(
     patient,
@@ -204,6 +210,9 @@ export async function runAgentLoop(
     scheduledTasks,
     prnOrders,
     recentHighlights,
+    pendingChanges,
+    headToToe,
+    activeChangeOrders,
   );
   let messages = toAnthropicMessages(conversationHistory);
 

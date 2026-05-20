@@ -6,6 +6,9 @@ import {
   getScheduledTasks,
   getPrnOrders,
   getPatientRecentBrief,
+  getPendingOrderChanges,
+  getHeadToToe,
+  getChangeOrdersForPatient,
 } from '../db/queries';
 import { runAgentLoop } from '../agent/agentLoop';
 import { buildRecapHighlights, renderHighlightsForPrompt } from '../agent/recapHighlights';
@@ -56,11 +59,14 @@ export function handleWebSocket(ws: WebSocket): void {
           }
 
           // Load conversation history + care plan + recent-history brief
-          const [history, scheduledTasks, prnOrders, recentBrief] = await Promise.all([
+          const [history, scheduledTasks, prnOrders, recentBrief, pendingChanges, h2t, activeChangeOrders] = await Promise.all([
             getConversationHistory(visitId),
             getScheduledTasks(data.patient.id),
             getPrnOrders(data.patient.id),
             getPatientRecentBrief(data.patient.id, { excludeVisitId: visitId }),
+            getPendingOrderChanges(data.patient.id),
+            getHeadToToe(visitId),
+            getChangeOrdersForPatient(data.patient.id, { status: 'pending_signature' }),
           ]);
 
           const highlights = buildRecapHighlights(
@@ -80,6 +86,9 @@ export function handleWebSocket(ws: WebSocket): void {
             scheduledTasks,
             prnOrders,
             highlightsBlock,
+            pendingChanges,
+            h2t,
+            activeChangeOrders,
           );
           break;
         }
@@ -104,11 +113,14 @@ export function handleWebSocket(ws: WebSocket): void {
             return;
           }
 
-          const [history, scheduledTasks, prnOrders, recentBrief] = await Promise.all([
+          const [history, scheduledTasks, prnOrders, recentBrief, pendingChanges, h2t, activeChangeOrders] = await Promise.all([
             getConversationHistory(visitId),
             getScheduledTasks(data.patient.id),
             getPrnOrders(data.patient.id),
             getPatientRecentBrief(data.patient.id, { excludeVisitId: visitId }),
+            getPendingOrderChanges(data.patient.id),
+            getHeadToToe(visitId),
+            getChangeOrdersForPatient(data.patient.id, { status: 'pending_signature' }),
           ]);
 
           const highlights = buildRecapHighlights(
@@ -128,6 +140,9 @@ export function handleWebSocket(ws: WebSocket): void {
             scheduledTasks,
             prnOrders,
             highlightsBlock,
+            pendingChanges,
+            h2t,
+            activeChangeOrders,
           );
           break;
         }

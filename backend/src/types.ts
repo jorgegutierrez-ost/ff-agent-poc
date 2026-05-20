@@ -14,6 +14,7 @@ export interface Patient {
   emergency_contact_name: string;
   emergency_contact_phone: string;
   emergency_contact_relation: string;
+  photo_url: string | null;
 }
 
 export interface Visit {

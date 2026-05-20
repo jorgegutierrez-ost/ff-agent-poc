@@ -1,6 +1,13 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ScheduleItem } from '../types';
 import { buildMedLine } from '../lib/medicationFormat';
+import { API_BASE } from '../config';
+import {
+  type DatedReading,
+  type Metric,
+  type VitalThresholds,
+  buildVitalWarning,
+} from '../lib/vitalRanges';
 
 // ─── Shared time-field helper ────────────────────────────────
 //
@@ -133,6 +140,32 @@ function TimeField({ label, hint, value, onChange, error, onClearError }: TimeFi
 
 // ─── Vitals Form ─────────────────────────────────────────────
 
+// Inline non-blocking alert rendered under each vital input. Hidden
+// when text is null so the form stays compact when nothing's flagged.
+// Color is informational (amber, not red) — the nurse can still submit.
+function VitalAlert({ text }: { text: string | null }) {
+  if (!text) return null;
+  return (
+    <div className="mt-1 flex items-start gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-2 py-1">
+      <svg
+        className="mt-0.5 h-3 w-3 shrink-0 text-amber-600"
+        fill="none"
+        viewBox="0 0 24 24"
+        stroke="currentColor"
+        strokeWidth={2}
+      >
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.732 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z"
+        />
+      </svg>
+      <p className="text-[11px] leading-snug text-amber-800">{text}</p>
+    </div>
+  );
+}
+
+
 interface VitalsFormData {
   bp_systolic: string;
   bp_diastolic: string;
@@ -169,15 +202,39 @@ function hasAtLeastOneVital(data: VitalsFormData): boolean {
 
 interface VitalsFormProps {
   item: ScheduleItem;
+  patientId: string;
   onSubmit: (item: ScheduleItem, data: Record<string, string>) => void;
   onCancel: () => void;
 }
 
-export function VitalsForm({ item, onSubmit, onCancel }: VitalsFormProps) {
+export function VitalsForm({ item, patientId, onSubmit, onCancel }: VitalsFormProps) {
   const [data, setData] = useState<VitalsFormData>(EMPTY_VITALS);
   const [occurredAt, setOccurredAt] = useState<string>(nowHHMM);
   const [showError, setShowError] = useState(false);
   const [timeError, setTimeError] = useState<string | null>(null);
+  const [thresholds, setThresholds] = useState<VitalThresholds>({});
+  const [recent, setRecent] = useState<DatedReading[]>([]);
+
+  // Fetch patient-age-appropriate thresholds and the last 3 days of
+  // vitals when the form opens. If the call fails we silently fall back
+  // to no warnings — the form must remain usable offline.
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_BASE}/api/patients/${patientId}/recent-vitals?days=3`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (cancelled || !d) return;
+        setThresholds(d.thresholds ?? {});
+        setRecent((d.readings ?? []) as DatedReading[]);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [patientId]);
+
+  const warn = (metric: Metric, raw: string): string | null =>
+    buildVitalWarning(metric, raw, thresholds, recent);
 
   const set = (field: keyof VitalsFormData, value: string) => {
     setData((prev) => ({ ...prev, [field]: value }));
@@ -254,6 +311,7 @@ export function VitalsForm({ item, onSubmit, onCancel }: VitalsFormProps) {
             />
             <span className="shrink-0 text-xs text-gray-400">mmHg</span>
           </div>
+          <VitalAlert text={warn('bpSys', data.bp_systolic)} />
         </div>
 
         <div className="grid grid-cols-2 gap-3">
@@ -272,6 +330,7 @@ export function VitalsForm({ item, onSubmit, onCancel }: VitalsFormProps) {
               />
               <span className="shrink-0 text-xs text-gray-400">bpm</span>
             </div>
+            <VitalAlert text={warn('hr', data.heart_rate)} />
           </div>
 
           {/* Temperature */}
@@ -290,6 +349,7 @@ export function VitalsForm({ item, onSubmit, onCancel }: VitalsFormProps) {
               />
               <span className="shrink-0 text-xs text-gray-400">°F</span>
             </div>
+            <VitalAlert text={warn('temp', data.temperature_f)} />
           </div>
 
           {/* Resp. Rate */}
@@ -307,6 +367,7 @@ export function VitalsForm({ item, onSubmit, onCancel }: VitalsFormProps) {
               />
               <span className="shrink-0 text-xs text-gray-400">/min</span>
             </div>
+            <VitalAlert text={warn('rr', data.respiratory_rate)} />
           </div>
 
           {/* O2 Saturation */}
@@ -324,6 +385,7 @@ export function VitalsForm({ item, onSubmit, onCancel }: VitalsFormProps) {
               />
               <span className="shrink-0 text-xs text-gray-400">%</span>
             </div>
+            <VitalAlert text={warn('spo2', data.o2_saturation)} />
           </div>
 
           {/* Weight */}
@@ -390,15 +452,13 @@ export function VitalsForm({ item, onSubmit, onCancel }: VitalsFormProps) {
 
 interface MedicationFormProps {
   item: ScheduleItem;
-  action: 'med_given' | 'med_skipped' | 'med_modified';
+  action: 'med_given' | 'med_skipped';
   onSubmit: (item: ScheduleItem, data: Record<string, string>) => void;
   onCancel: () => void;
 }
 
 export function MedicationForm({ item, action, onSubmit, onCancel }: MedicationFormProps) {
   const [reason, setReason] = useState('');
-  const [dose, setDose] = useState('');
-  const [route, setRoute] = useState('');
   const [notes, setNotes] = useState('');
   // Administration time for med_given. Prefilled with the current time as a
   // suggestion, but the nurse must confirm or edit it — never silently
@@ -409,10 +469,6 @@ export function MedicationForm({ item, action, onSubmit, onCancel }: MedicationF
 
   const handleSubmit = () => {
     if (action === 'med_skipped' && !reason.trim()) {
-      setShowError(true);
-      return;
-    }
-    if (action === 'med_modified' && !dose.trim() && !route.trim() && !notes.trim()) {
       setShowError(true);
       return;
     }
@@ -428,12 +484,8 @@ export function MedicationForm({ item, action, onSubmit, onCancel }: MedicationF
     if (action === 'med_given') {
       data.notes = notes;
       data.administered_at = administeredAt.trim();
-    } else if (action === 'med_skipped') {
-      data.reason = reason;
     } else {
-      data.dose = dose;
-      data.route = route;
-      data.notes = notes;
+      data.reason = reason;
     }
     onSubmit(item, data);
   };
@@ -531,13 +583,169 @@ export function MedicationForm({ item, action, onSubmit, onCancel }: MedicationF
     );
   }
 
-  // med_modified
+  return null;
+}
+
+// ─── Change Order Form ───────────────────────────────────────────
+//
+// Real KanTime-style workflow: nurse documents the physician-authorized
+// change with a required source (verbal / pharmacy label / written
+// note), the new dose/route/frequency, and submits. The fax pipeline is
+// stubbed server-side; the schedule card flips to the new values
+// immediately so the nurse can document against the new order without
+// waiting for the signature.
+//
+// Per Renee/Nichole's meeting: a nurse must not be able to change a
+// dose/route on her own — the source-of-authority section gates submit.
+
+type ChangeOrderType = 'add' | 'modify_dose' | 'modify_route' | 'modify_frequency' | 'discontinue';
+type ChangeOrderSource = 'verbal' | 'pharmacy_label' | 'written_note';
+
+const CHANGE_TYPE_OPTIONS: Array<{ value: ChangeOrderType; label: string; hint: string }> = [
+  { value: 'modify_dose',      label: 'Modify dose',      hint: 'New dose for an existing order.' },
+  { value: 'modify_route',     label: 'Modify route',     hint: 'Same drug, new route.' },
+  { value: 'modify_frequency', label: 'Modify frequency', hint: 'Same drug + dose, new schedule.' },
+  { value: 'discontinue',      label: 'Discontinue',      hint: 'Stop this medication.' },
+  { value: 'add',              label: 'Add new med',      hint: 'Brand new order — needs full source.' },
+];
+
+const SOURCE_OPTIONS: Array<{ value: ChangeOrderSource; label: string }> = [
+  { value: 'verbal',         label: 'Verbal from physician' },
+  { value: 'pharmacy_label', label: 'Pharmacy label' },
+  { value: 'written_note',   label: 'Written note (office visit)' },
+];
+
+interface ChangeOrderFormProps {
+  item: ScheduleItem;
+  visitId: string;
+  /** Set to true when the form is opened from the "+ New change order"
+   *  header button rather than from a specific med card. We drop the
+   *  pre-filled medication name and require the nurse to type it in. */
+  isHeaderInitiated?: boolean;
+  /** Fired with the saved change-order payload so the visit page can
+   *  flip the matching schedule item in-state without a full refetch. */
+  onSubmit: (item: ScheduleItem, data: Record<string, string>) => void;
+  onCancel: () => void;
+}
+
+export function ChangeOrderForm({
+  item,
+  visitId,
+  isHeaderInitiated = false,
+  onSubmit,
+  onCancel,
+}: ChangeOrderFormProps) {
+  // Default change type depends on entry point: header → add new med;
+  // card tap → modify dose (the common case).
+  const [changeType, setChangeType] = useState<ChangeOrderType>(
+    isHeaderInitiated ? 'add' : 'modify_dose',
+  );
+  const [medName, setMedName] = useState(isHeaderInitiated ? '' : item.label);
+  const [newDose, setNewDose] = useState('');
+  const [newRoute, setNewRoute] = useState('');
+  const [newFreq, setNewFreq] = useState('');
+  const [newConcentration, setNewConcentration] = useState('');
+  const [newIndication, setNewIndication] = useState('');
+  const [newInstructions, setNewInstructions] = useState('');
+  const [reason, setReason] = useState('');
+
+  const [sourceType, setSourceType] = useState<ChangeOrderSource>('verbal');
+  const [sourcePhysician, setSourcePhysician] = useState('');
+  const [sourceTime, setSourceTime] = useState<string>(nowHHMM);
+  const [sourceDescription, setSourceDescription] = useState('');
+
+  const [notes, setNotes] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Which "new value" fields are required for each change type.
+  const requires = (field: 'dose' | 'route' | 'frequency'): boolean => {
+    if (changeType === 'add') return field === 'dose'; // add at minimum needs a dose
+    if (changeType === 'modify_dose')      return field === 'dose';
+    if (changeType === 'modify_route')     return field === 'route';
+    if (changeType === 'modify_frequency') return field === 'frequency';
+    return false;
+  };
+
+  function sourceComplete(): boolean {
+    if (sourceType === 'verbal') return sourcePhysician.trim() !== '' && HHMM_RE.test(sourceTime.trim());
+    return sourceDescription.trim() !== '';
+  }
+
+  function readyToSubmit(): boolean {
+    if (!medName.trim()) return false;
+    if (!sourceComplete()) return false;
+    if (changeType === 'modify_dose'      && !newDose.trim())  return false;
+    if (changeType === 'modify_route'     && !newRoute.trim()) return false;
+    if (changeType === 'modify_frequency' && !newFreq.trim())  return false;
+    if (changeType === 'add'              && !newDose.trim())  return false;
+    return true;
+  }
+
+  async function handleSubmit() {
+    if (!readyToSubmit() || submitting) return;
+    setError(null);
+    setSubmitting(true);
+    try {
+      // Synthesize an ISO timestamp for the verbal source when the
+      // nurse only entered HH:MM. The backend tolerates either, but
+      // storing ISO keeps the audit trail sortable.
+      let sourceObtainedAt: string | null = null;
+      if (sourceType === 'verbal' && HHMM_RE.test(sourceTime.trim())) {
+        const today = new Date().toISOString().slice(0, 10);
+        sourceObtainedAt = `${today}T${sourceTime.trim()}:00`;
+      }
+      const payload = {
+        scheduled_task_id: isHeaderInitiated ? null : item.id,
+        medication_name: medName.trim(),
+        change_type: changeType,
+        old_dose: isHeaderInitiated ? null : item.dose ?? null,
+        old_route: isHeaderInitiated ? null : item.route ?? null,
+        old_frequency: isHeaderInitiated ? null : item.sublabel ?? null,
+        new_dose: newDose.trim() || null,
+        new_route: newRoute.trim() || null,
+        new_frequency: newFreq.trim() || null,
+        new_concentration: newConcentration.trim() || null,
+        new_indication: newIndication.trim() || null,
+        new_instructions: newInstructions.trim() || null,
+        reason: reason.trim() || null,
+        source_type: sourceType,
+        source_physician: sourceType === 'verbal' ? sourcePhysician.trim() : null,
+        source_obtained_at: sourceObtainedAt,
+        source_description: sourceType === 'verbal' ? null : sourceDescription.trim(),
+        notes: notes.trim() || null,
+      };
+      const resp = await fetch(`${API_BASE}/api/visits/${visitId}/change-orders`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!resp.ok) {
+        const detail = await resp.json().catch(() => null);
+        throw new Error(detail?.error ?? 'Could not save change order.');
+      }
+      onSubmit(item, {
+        action: 'change_order_submitted',
+        medication_name: payload.medication_name,
+        change_type: changeType,
+        new_dose: payload.new_dose ?? '',
+        new_route: payload.new_route ?? '',
+        new_frequency: payload.new_frequency ?? '',
+        source_type: sourceType,
+        source_physician: payload.source_physician ?? '',
+        source_obtained_at: sourceObtainedAt ?? '',
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not save change order.');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-4">
       <div className="mb-3 flex items-center justify-between">
-        <h4 className="text-sm font-semibold text-gray-900">
-          Modify dose
-        </h4>
+        <h4 className="text-sm font-semibold text-gray-900">Change Order</h4>
         <button onClick={onCancel} className="text-gray-400 hover:text-gray-600">
           <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
@@ -545,67 +753,264 @@ export function MedicationForm({ item, action, onSubmit, onCancel }: MedicationF
         </button>
       </div>
 
-      <ScheduledHeader item={item} />
+      {/* Pre-change snapshot. Reminds the nurse what she's replacing. */}
+      {!isHeaderInitiated && <ScheduledHeader item={item} />}
 
-      {showError && (
-        <p className="mb-2 text-xs text-red-500">
-          Please describe what was modified.
+      {/* SECTION 1 — Source of authority (required, gates submit) */}
+      <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5">
+        <p className="mb-2 text-[10px] font-semibold tracking-widest text-amber-800 uppercase">
+          1 · Source of authority <span className="text-amber-600">(required)</span>
         </p>
-      )}
-      <div className="space-y-3">
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="mb-1 block text-[11px] font-medium text-gray-500 uppercase">
-              New dose
-            </label>
-            <input
-              type="text"
-              placeholder="e.g. 12.5mg"
-              value={dose}
-              onChange={(e) => {
-                setDose(e.target.value);
-                if (showError) setShowError(false);
-              }}
-              className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900 placeholder-gray-300 outline-none focus:border-gray-300 focus:bg-white"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-[11px] font-medium text-gray-500 uppercase">
-              Route
-            </label>
-            <input
-              type="text"
-              placeholder="e.g. IV"
-              value={route}
-              onChange={(e) => {
-                setRoute(e.target.value);
-                if (showError) setShowError(false);
-              }}
-              className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900 placeholder-gray-300 outline-none focus:border-gray-300 focus:bg-white"
-            />
-          </div>
+        <p className="mb-2 text-[11px] leading-snug text-amber-900">
+          Nurses cannot change orders independently. Document where the
+          authorization came from.
+        </p>
+
+        <div className="mb-2 flex flex-wrap gap-1.5">
+          {SOURCE_OPTIONS.map((s) => (
+            <button
+              key={s.value}
+              type="button"
+              onClick={() => setSourceType(s.value)}
+              className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                sourceType === s.value
+                  ? 'bg-amber-700 text-white'
+                  : 'bg-white text-amber-900 ring-1 ring-amber-300 hover:bg-amber-100'
+              }`}
+            >
+              {s.label}
+            </button>
+          ))}
         </div>
-        <div>
-          <label className="mb-1 block text-[11px] font-medium text-gray-500 uppercase">
-            Notes
+
+        {sourceType === 'verbal' && (
+          <div className="space-y-2">
+            <div>
+              <label className="mb-0.5 block text-[10px] font-medium text-amber-900 uppercase">
+                Physician <span className="text-amber-700">*</span>
+              </label>
+              <input
+                type="text"
+                value={sourcePhysician}
+                onChange={(e) => setSourcePhysician(e.target.value)}
+                placeholder="e.g. Dr. Patel"
+                className="w-full rounded-md border border-amber-300 bg-white px-2.5 py-1.5 text-xs text-gray-900 placeholder-amber-400 outline-none focus:border-amber-500"
+              />
+            </div>
+            <div>
+              <label className="mb-0.5 block text-[10px] font-medium text-amber-900 uppercase">
+                Verbal obtained at <span className="text-amber-700">*</span>
+              </label>
+              <input
+                type="time"
+                value={sourceTime}
+                onChange={(e) => setSourceTime(e.target.value)}
+                className="rounded-md border border-amber-300 bg-white px-2.5 py-1.5 text-xs tabular-nums text-gray-900 outline-none focus:border-amber-500"
+              />
+            </div>
+          </div>
+        )}
+
+        {sourceType !== 'verbal' && (
+          <div>
+            <label className="mb-0.5 block text-[10px] font-medium text-amber-900 uppercase">
+              {sourceType === 'pharmacy_label' ? 'Label details / pharmacy' : 'Note details / office visit date'}{' '}
+              <span className="text-amber-700">*</span>
+            </label>
+            <input
+              type="text"
+              value={sourceDescription}
+              onChange={(e) => setSourceDescription(e.target.value)}
+              placeholder={
+                sourceType === 'pharmacy_label'
+                  ? 'e.g. CVS label, filled 5/19, Rx#7842'
+                  : 'e.g. Office visit 5/19 — note from Dr. Patel'
+              }
+              className="w-full rounded-md border border-amber-300 bg-white px-2.5 py-1.5 text-xs text-gray-900 placeholder-amber-400 outline-none focus:border-amber-500"
+            />
+          </div>
+        )}
+      </div>
+
+      {/* SECTION 2 — The change */}
+      <div className="mb-4">
+        <p className="mb-2 text-[10px] font-semibold tracking-widest text-gray-500 uppercase">
+          2 · The change
+        </p>
+
+        <label className="mb-1 block text-[11px] font-medium text-gray-600 uppercase">
+          Medication <span className="text-red-500">*</span>
+        </label>
+        <input
+          type="text"
+          value={medName}
+          onChange={(e) => setMedName(e.target.value)}
+          disabled={!isHeaderInitiated}
+          placeholder={isHeaderInitiated ? 'Drug name' : ''}
+          className={`mb-3 w-full rounded-lg border px-3 py-2 text-sm outline-none ${
+            isHeaderInitiated
+              ? 'border-gray-200 bg-gray-50 text-gray-900 focus:border-gray-300 focus:bg-white'
+              : 'border-gray-100 bg-gray-100 text-gray-600'
+          }`}
+        />
+
+        <label className="mb-1 block text-[11px] font-medium text-gray-600 uppercase">
+          Change type
+        </label>
+        <div className="mb-3 flex flex-wrap gap-1.5">
+          {CHANGE_TYPE_OPTIONS
+            .filter((o) => isHeaderInitiated || o.value !== 'add')
+            .map((o) => (
+              <button
+                key={o.value}
+                type="button"
+                onClick={() => setChangeType(o.value)}
+                title={o.hint}
+                className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                  changeType === o.value
+                    ? 'bg-gray-900 text-white'
+                    : 'bg-white text-gray-700 ring-1 ring-gray-200 hover:bg-gray-50'
+                }`}
+              >
+                {o.label}
+              </button>
+            ))}
+        </div>
+
+        {/* New-value inputs — only render the fields that the chosen
+            change type cares about. Discontinue has none. */}
+        {changeType !== 'discontinue' && (
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
+                New dose {requires('dose') && <span className="text-red-500">*</span>}
+              </label>
+              <input
+                type="text"
+                value={newDose}
+                onChange={(e) => setNewDose(e.target.value)}
+                placeholder="e.g. 7.5 mg"
+                className="w-full rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300 focus:bg-white"
+              />
+            </div>
+            <div>
+              <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
+                New route {requires('route') && <span className="text-red-500">*</span>}
+              </label>
+              <input
+                type="text"
+                value={newRoute}
+                onChange={(e) => setNewRoute(e.target.value)}
+                placeholder="e.g. Oral"
+                className="w-full rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300 focus:bg-white"
+              />
+            </div>
+            <div>
+              <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
+                New frequency {requires('frequency') && <span className="text-red-500">*</span>}
+              </label>
+              <input
+                type="text"
+                value={newFreq}
+                onChange={(e) => setNewFreq(e.target.value)}
+                placeholder="e.g. Three times daily"
+                className="w-full rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300 focus:bg-white"
+              />
+            </div>
+            <div>
+              <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
+                New concentration
+              </label>
+              <input
+                type="text"
+                value={newConcentration}
+                onChange={(e) => setNewConcentration(e.target.value)}
+                placeholder="e.g. 5 mg / 5 mL"
+                className="w-full rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300 focus:bg-white"
+              />
+            </div>
+          </div>
+        )}
+
+        {changeType === 'add' && (
+          <div className="mt-2 grid grid-cols-1 gap-2">
+            <div>
+              <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
+                Indication
+              </label>
+              <input
+                type="text"
+                value={newIndication}
+                onChange={(e) => setNewIndication(e.target.value)}
+                placeholder="What is this med for?"
+                className="w-full rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300 focus:bg-white"
+              />
+            </div>
+            <div>
+              <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
+                Special instructions
+              </label>
+              <input
+                type="text"
+                value={newInstructions}
+                onChange={(e) => setNewInstructions(e.target.value)}
+                placeholder="e.g. Give 30 min before meals"
+                className="w-full rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300 focus:bg-white"
+              />
+            </div>
+          </div>
+        )}
+
+        <div className="mt-2">
+          <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
+            Reason for change
           </label>
           <input
             type="text"
-            placeholder="Reason for modification..."
-            value={notes}
-            onChange={(e) => {
-              setNotes(e.target.value);
-              if (showError) setShowError(false);
-            }}
-            className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900 placeholder-gray-300 outline-none focus:border-gray-300 focus:bg-white"
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="e.g. Worsening spasticity per parent"
+            className="w-full rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300 focus:bg-white"
           />
         </div>
       </div>
+
+      {/* SECTION 3 — Notes + submit */}
+      <div className="mb-3">
+        <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
+          Notes <span className="font-normal normal-case text-gray-400">(optional)</span>
+        </label>
+        <input
+          type="text"
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="Anything else the office should know"
+          className="w-full rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300 focus:bg-white"
+        />
+      </div>
+
+      <p className="mb-3 text-[10px] leading-snug text-gray-500">
+        On submit: this change order is queued for the physician's
+        signature (fax pipeline). You can document against the new order
+        immediately — you don't have to wait for the signature.
+      </p>
+
+      {error && (
+        <p className="mb-2 rounded-md border border-rose-200 bg-rose-50 px-2 py-1.5 text-[11px] text-rose-700">
+          {error}
+        </p>
+      )}
+
       <button
         onClick={handleSubmit}
-        className="mt-3 w-full rounded-lg bg-gray-900 py-2.5 text-sm font-medium text-white transition-colors hover:bg-gray-800"
+        disabled={!readyToSubmit() || submitting}
+        className={`w-full rounded-lg py-2.5 text-sm font-medium transition-colors ${
+          !readyToSubmit() || submitting
+            ? 'cursor-not-allowed bg-gray-200 text-gray-400'
+            : 'bg-gray-900 text-white hover:bg-gray-800'
+        }`}
       >
-        Confirm modification
+        {submitting ? 'Submitting…' : 'Submit change order'}
       </button>
     </div>
   );
@@ -1132,6 +1537,243 @@ export function SuctionForm({ item, onSubmit, onCancel }: SuctionFormProps) {
         className="mt-3 w-full rounded-lg bg-gray-900 py-2.5 text-sm font-medium text-white transition-colors hover:bg-gray-800"
       >
         Log {count > 1 ? `${count} passes` : 'pass'}
+      </button>
+    </div>
+  );
+}
+
+// ─── Seizure Form ────────────────────────────────────────────
+// Mirrors the KanTime seizure log: occurred_at, duration, type, LOC,
+// intervention, notes. Mid-shift triggerable (no scheduled task
+// required) so the quick-log strip can open it independent of the
+// regular schedule flow.
+
+const SEIZURE_TYPES = [
+  'Absence', 'Atonic', 'Autonomic', 'Clonic', 'Emotional',
+  'Myoclonic', 'Sensory', 'Tonic', 'Tonic-Clonic', 'Other',
+];
+const LOC_OPTIONS: Array<{ value: 'alert' | 'oriented' | 'lethargic'; label: string }> = [
+  { value: 'alert',     label: 'Alert' },
+  { value: 'oriented',  label: 'Oriented' },
+  { value: 'lethargic', label: 'Lethargic' },
+];
+
+interface SeizureFormProps {
+  item: ScheduleItem;
+  visitId: string;
+  onSubmit: (item: ScheduleItem, data: Record<string, string>) => void;
+  onCancel: () => void;
+}
+
+export function SeizureForm({ item, visitId, onSubmit, onCancel }: SeizureFormProps) {
+  const [occurredAt, setOccurredAt] = useState<string>(nowHHMM);
+  const [durationMin, setDurationMin] = useState('');
+  const [durationSec, setDurationSec] = useState('');
+  const [seizureType, setSeizureType] = useState('');
+  const [otherType, setOtherType] = useState('');
+  const [loc, setLoc] = useState<'alert' | 'oriented' | 'lethargic' | ''>('');
+  const [intervention, setIntervention] = useState('');
+  const [notes, setNotes] = useState('');
+  const [timeError, setTimeError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleSubmit = async () => {
+    if (submitting) return;
+    if (!HHMM_RE.test(occurredAt.trim())) {
+      setTimeError('Enter when the seizure started (HH:MM, 24-hour).');
+      return;
+    }
+    const minutes = parseInt(durationMin || '0', 10);
+    const seconds = parseInt(durationSec || '0', 10);
+    const durationTotal = minutes * 60 + seconds;
+    const resolvedType = seizureType === 'Other' ? otherType.trim() : seizureType;
+
+    setError(null);
+    setSubmitting(true);
+    try {
+      const resp = await fetch(`${API_BASE}/api/visits/${visitId}/seizure-events`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          occurred_at: occurredAt.trim(),
+          duration_seconds: durationTotal > 0 ? durationTotal : null,
+          seizure_type: resolvedType || null,
+          loc: loc || null,
+          intervention: intervention.trim() || null,
+          notes: notes.trim() || null,
+        }),
+      });
+      if (!resp.ok) throw new Error('Save failed');
+      onSubmit(item, {
+        action: 'seizure_logged',
+        occurred_at: occurredAt.trim(),
+        duration_seconds: String(durationTotal),
+        seizure_type: resolvedType,
+        loc,
+        intervention: intervention.trim(),
+        notes: notes.trim(),
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Save failed');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <h4 className="text-sm font-semibold text-gray-900">Log seizure event</h4>
+        <button onClick={onCancel} className="text-gray-400 hover:text-gray-600">
+          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+
+      <TimeField
+        label="Time started"
+        hint="Time the seizure began."
+        value={occurredAt}
+        onChange={setOccurredAt}
+        error={timeError}
+        onClearError={() => timeError && setTimeError(null)}
+      />
+
+      {/* Duration */}
+      <div className="mb-3">
+        <label className="mb-1 block text-[11px] font-medium text-gray-500 uppercase">
+          Duration <span className="font-normal normal-case text-gray-400">(optional)</span>
+        </label>
+        <div className="flex items-center gap-2">
+          <input
+            type="number"
+            min="0"
+            value={durationMin}
+            onChange={(e) => setDurationMin(e.target.value)}
+            placeholder="0"
+            className="w-20 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm tabular-nums text-gray-900 outline-none focus:border-gray-300 focus:bg-white"
+          />
+          <span className="text-xs text-gray-400">min</span>
+          <input
+            type="number"
+            min="0"
+            max="59"
+            value={durationSec}
+            onChange={(e) => setDurationSec(e.target.value)}
+            placeholder="0"
+            className="w-20 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm tabular-nums text-gray-900 outline-none focus:border-gray-300 focus:bg-white"
+          />
+          <span className="text-xs text-gray-400">sec</span>
+        </div>
+      </div>
+
+      {/* Type */}
+      <div className="mb-3">
+        <label className="mb-1 block text-[11px] font-medium text-gray-500 uppercase">
+          Type
+        </label>
+        <div className="flex flex-wrap gap-1.5">
+          {SEIZURE_TYPES.map((t) => {
+            const active = seizureType === t;
+            return (
+              <button
+                key={t}
+                type="button"
+                onClick={() => setSeizureType(active ? '' : t)}
+                className={`rounded-full border px-2.5 py-1 text-xs font-medium transition-colors ${
+                  active
+                    ? 'border-gray-900 bg-gray-900 text-white'
+                    : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-50'
+                }`}
+              >
+                {t}
+              </button>
+            );
+          })}
+        </div>
+        {seizureType === 'Other' && (
+          <input
+            type="text"
+            value={otherType}
+            onChange={(e) => setOtherType(e.target.value)}
+            placeholder="Describe activity witnessed"
+            className="mt-2 w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900 placeholder-gray-300 outline-none focus:border-gray-300 focus:bg-white"
+          />
+        )}
+      </div>
+
+      {/* LOC */}
+      <div className="mb-3">
+        <label className="mb-1 block text-[11px] font-medium text-gray-500 uppercase">
+          LOC after event
+        </label>
+        <div className="flex gap-1.5">
+          {LOC_OPTIONS.map((o) => {
+            const active = loc === o.value;
+            return (
+              <button
+                key={o.value}
+                type="button"
+                onClick={() => setLoc(active ? '' : o.value)}
+                className={`flex-1 rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
+                  active
+                    ? 'border-gray-900 bg-gray-900 text-white'
+                    : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-50'
+                }`}
+              >
+                {o.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Intervention */}
+      <div className="mb-3">
+        <label className="mb-1 block text-[11px] font-medium text-gray-500 uppercase">
+          Intervention
+        </label>
+        <input
+          type="text"
+          value={intervention}
+          onChange={(e) => setIntervention(e.target.value)}
+          placeholder="e.g. positioned on side, suctioned, gave PRN Diazepam"
+          className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900 placeholder-gray-300 outline-none focus:border-gray-300 focus:bg-white"
+        />
+      </div>
+
+      {/* Notes */}
+      <div className="mb-1">
+        <label className="mb-1 block text-[11px] font-medium text-gray-500 uppercase">
+          Notes <span className="font-normal normal-case text-gray-400">(optional)</span>
+        </label>
+        <input
+          type="text"
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="Witnessed activity, trigger, post-ictal state"
+          className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900 placeholder-gray-300 outline-none focus:border-gray-300 focus:bg-white"
+        />
+      </div>
+
+      {error && (
+        <p className="mt-2 rounded-md border border-rose-200 bg-rose-50 px-2 py-1.5 text-[11px] text-rose-700">
+          {error}
+        </p>
+      )}
+
+      <button
+        onClick={handleSubmit}
+        disabled={submitting}
+        className={`mt-3 w-full rounded-lg py-2.5 text-sm font-medium transition-colors ${
+          submitting
+            ? 'cursor-not-allowed bg-gray-200 text-gray-400'
+            : 'bg-gray-900 text-white hover:bg-gray-800'
+        }`}
+      >
+        {submitting ? 'Saving…' : 'Save seizure event'}
       </button>
     </div>
   );

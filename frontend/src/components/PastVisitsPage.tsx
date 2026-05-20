@@ -17,6 +17,32 @@ interface PastVisitRow {
   patient_id: string;
   patient_name: string;
   narrative_excerpt: string | null;
+  /** Source columns that matched the current search query, e.g.
+   *  ['medication', 'narrative']. Empty when no q was sent. */
+  match_sources?: string[];
+}
+
+// Quick date-range presets the nurse can tap. 'all' clears both bounds.
+type RangePreset = 'all' | '7d' | '30d' | '90d';
+const RANGE_LABELS: Record<RangePreset, string> = {
+  all: 'All time',
+  '7d': 'Last 7 days',
+  '30d': 'Last 30 days',
+  '90d': 'Last 90 days',
+};
+
+function isoDaysAgo(days: number): string {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - days);
+  return d.toISOString().slice(0, 10);
+}
+
+function fromForPreset(p: RangePreset): string | undefined {
+  if (p === 'all')  return undefined;
+  if (p === '7d')   return isoDaysAgo(7);
+  if (p === '30d')  return isoDaysAgo(30);
+  return isoDaysAgo(90);
 }
 
 interface VitalSignsDto {
@@ -174,14 +200,32 @@ export default function PastVisitsPage({ patients }: PastVisitsPageProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
   const [patientFilter, setPatientFilter] = useState<string | null>(null);
+  const [rangePreset, setRangePreset] = useState<RangePreset>('all');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<VisitSummary | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
+  // Debounce keystrokes so we don't slam the server on every character.
+  useEffect(() => {
+    const id = window.setTimeout(() => setDebouncedQuery(query), 250);
+    return () => window.clearTimeout(id);
+  }, [query]);
+
+  // Server-side fetch — re-runs when search params change. The server
+  // owns date filtering and the multi-column ILIKE; the page no longer
+  // does client-side filtering so result counts always match the row
+  // count below.
   useEffect(() => {
     setLoading(true);
-    fetch(`${API_BASE}/api/visits/past`)
+    const params = new URLSearchParams();
+    if (debouncedQuery.trim()) params.set('q', debouncedQuery.trim());
+    if (patientFilter) params.set('patientId', patientFilter);
+    const from = fromForPreset(rangePreset);
+    if (from) params.set('from', from);
+    const url = `${API_BASE}/api/visits/past${params.toString() ? `?${params.toString()}` : ''}`;
+    fetch(url)
       .then((r) => {
         if (!r.ok) throw new Error('Failed to load past visits');
         return r.json();
@@ -192,17 +236,10 @@ export default function PastVisitsPage({ patients }: PastVisitsPageProps) {
       })
       .catch((e) => setError(e instanceof Error ? e.message : 'Load failed'))
       .finally(() => setLoading(false));
-  }, []);
+  }, [debouncedQuery, patientFilter, rangePreset]);
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return rows.filter((r) => {
-      if (patientFilter && r.patient_id !== patientFilter) return false;
-      if (!q) return true;
-      const haystack = `${r.patient_name} ${r.narrative_excerpt ?? ''}`.toLowerCase();
-      return haystack.includes(q);
-    });
-  }, [rows, query, patientFilter]);
+  // Server already filtered — list view consumes rows directly.
+  const filtered = rows;
 
   // Auto-select first result when filter/query changes and the current
   // selection is no longer in the result set.
@@ -271,7 +308,25 @@ export default function PastVisitsPage({ patients }: PastVisitsPageProps) {
             />
           </div>
 
-          {/* Filter chips — only useful with multiple patients in history */}
+          {/* Date-range chips — server-side filter, so the result count
+              below always matches what the nurse sees. */}
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            {(['all', '7d', '30d', '90d'] as RangePreset[]).map((p) => (
+              <button
+                key={p}
+                onClick={() => setRangePreset(p)}
+                className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                  rangePreset === p
+                    ? 'bg-gray-900 text-white'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                {RANGE_LABELS[p]}
+              </button>
+            ))}
+          </div>
+
+          {/* Patient chips — only useful with multiple patients in history */}
           {patientChips.length > 1 && (
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <button
@@ -355,6 +410,16 @@ export default function PastVisitsPage({ patients }: PastVisitsPageProps) {
                     <p className={`mt-0.5 text-xs ${isSelected ? 'text-white/60' : 'text-gray-400'}`}>
                       {formatTimeRange(r.planned_start_time, r.planned_end_time)} · {r.service_type}
                     </p>
+                    {/* "Found in:" badge tells the nurse which field
+                        matched her query — disambiguates a med-name hit
+                        from a narrative paraphrase. */}
+                    {debouncedQuery.trim() && r.match_sources && r.match_sources.length > 0 && (
+                      <p className={`mt-1 text-[10px] uppercase tracking-wider ${
+                        isSelected ? 'text-white/60' : 'text-gray-400'
+                      }`}>
+                        Match: {r.match_sources.join(' · ')}
+                      </p>
+                    )}
                     {r.narrative_excerpt && (
                       <p className={`mt-1.5 text-xs leading-relaxed ${isSelected ? 'text-white/75' : 'text-gray-500'}`}>
                         <Excerpt content={r.narrative_excerpt} query={query} maxLen={180} />

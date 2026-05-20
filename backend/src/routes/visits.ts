@@ -17,7 +17,20 @@ import {
   upsertNarrative,
   getScheduledTasks,
   searchPastVisits,
+  getIdentificationCheck,
+  saveIdentificationCheck,
+  getHeadToToe,
+  saveHeadToToe,
+  saveSeizureEvent,
+  getSeizureEvents,
+  saveChangeOrder,
+  getChangeOrdersForVisit,
+  getChangeOrdersForPatient,
+  markChangeOrderSigned,
+  VALID_CHANGE_TYPES,
+  VALID_SOURCE_TYPES,
 } from '../db/queries';
+import { HEAD_TO_TOE_SYSTEMS, HEAD_TO_TOE_SYSTEM_IDS } from '../agent/headToToeSystems';
 
 const HARDCODED_NURSE_ID = '00000000-0000-0000-0000-000000000001';
 
@@ -37,8 +50,10 @@ router.get('/past', async (req, res) => {
   try {
     const patientId = typeof req.query.patientId === 'string' ? req.query.patientId : undefined;
     const q         = typeof req.query.q         === 'string' ? req.query.q         : undefined;
+    const from      = typeof req.query.from      === 'string' ? req.query.from      : undefined;
+    const to        = typeof req.query.to        === 'string' ? req.query.to        : undefined;
     const limit     = typeof req.query.limit     === 'string' ? Number(req.query.limit) : undefined;
-    const rows = await searchPastVisits(HARDCODED_NURSE_ID, { patientId, q, limit });
+    const rows = await searchPastVisits(HARDCODED_NURSE_ID, { patientId, q, from, to, limit });
     res.json(rows);
   } catch (err) {
     console.error('[visits/past] Error:', err);
@@ -49,25 +64,286 @@ router.get('/past', async (req, res) => {
 router.get('/:visitId/summary', async (req, res) => {
   try {
     const { visitId } = req.params;
-    const [vitals, allVitals, interventions, medications, narrative, suctionEvents] = await Promise.all([
+    const [vitals, allVitals, interventions, medications, narrative, suctionEvents, seizureEvents] = await Promise.all([
       getVitals(visitId),
       getAllVitals(visitId),
       getInterventions(visitId),
       getMedications(visitId),
       getNarrative(visitId),
       getSuctionEvents(visitId),
+      getSeizureEvents(visitId),
     ]);
     res.json({
       vitals,
       all_vitals: allVitals,
       interventions,
       medications,
+      seizure_events: seizureEvents,
       narrative,
       suction_events: suctionEvents,
     });
   } catch (err) {
     console.error('[visits/summary] Error:', err);
     res.status(500).json({ error: 'Failed to fetch visit summary' });
+  }
+});
+
+// ─── Patient identification check (regulatory gate) ──────────
+//
+// The frontend calls GET on visit load to decide whether to show the
+// identification modal or skip straight to the visit. POST writes the
+// check; the unique constraint on visit_id makes the call idempotent.
+
+router.get('/:visitId/identification', async (req, res) => {
+  try {
+    const check = await getIdentificationCheck(req.params.visitId);
+    if (!check) {
+      res.status(404).json({ error: 'No identification check on file' });
+      return;
+    }
+    res.json(check);
+  } catch (err) {
+    console.error('[visits/identification GET] Error:', err);
+    res.status(500).json({ error: 'Failed to fetch identification check' });
+  }
+});
+
+const ALLOWED_IDENTIFIERS = new Set([
+  'full_name', 'dob', 'picture_id', 'address', 'visual',
+]);
+
+router.post('/:visitId/identification', async (req, res) => {
+  try {
+    const { visitId } = req.params;
+    const body = req.body ?? {};
+    const identifiers = Array.isArray(body.identifiers)
+      ? (body.identifiers as unknown[]).filter((v): v is string => typeof v === 'string')
+      : [];
+    const cleaned = Array.from(new Set(identifiers)).filter((id) => ALLOWED_IDENTIFIERS.has(id));
+    if (cleaned.length < 2) {
+      res.status(400).json({ error: 'At least 2 identifiers are required.' });
+      return;
+    }
+    const confirmedWith = typeof body.confirmed_with === 'string' && body.confirmed_with.trim()
+      ? body.confirmed_with.trim()
+      : null;
+    const notes = typeof body.notes === 'string' && body.notes.trim() ? body.notes.trim() : null;
+    const check = await saveIdentificationCheck(visitId, cleaned, confirmedWith, notes);
+    res.json(check);
+  } catch (err) {
+    console.error('[visits/identification POST] Error:', err);
+    res.status(500).json({ error: 'Failed to save identification check' });
+  }
+});
+
+// ─── Head-to-toe assessment ───────────────────────────────────
+// The form definition (systems + exception flags) is served alongside
+// the saved values so the frontend renders the exact set of checkboxes
+// the backend will validate against. Avoids drift if the two sides ship
+// independent edits to the system list.
+
+// ─── Change orders ───────────────────────────────────────────
+// Nurse-initiated medication change request. The route enforces:
+//   1. A valid change_type (modify dose/route/frequency, discontinue, add)
+//   2. A documented source of authority (verbal/pharmacy_label/written_note)
+//   3. The source-specific fields the form requires (physician+timestamp
+//      for verbal, source_description for the others)
+// A field nurse cannot insert a row without a source, even if she
+// hand-crafts a POST — matching the meeting note "they do not want
+// nurses to be able to modify the dose, route, or otherwise create a
+// new order without approval."
+
+router.get('/:visitId/change-orders', async (req, res) => {
+  try {
+    const rows = await getChangeOrdersForVisit(req.params.visitId);
+    res.json(rows);
+  } catch (err) {
+    console.error('[visits/change-orders GET] Error:', err);
+    res.status(500).json({ error: 'Failed to fetch change orders' });
+  }
+});
+
+router.post('/:visitId/change-orders', async (req, res) => {
+  try {
+    const { visitId } = req.params;
+    const body = req.body ?? {};
+
+    // Resolve the visit so we can stamp patient_id without trusting the
+    // client to pass it.
+    const ctx = await getVisitWithPatient(visitId);
+    if (!ctx) {
+      res.status(404).json({ error: 'Visit not found' });
+      return;
+    }
+
+    const changeType = body.change_type;
+    if (!VALID_CHANGE_TYPES.includes(changeType)) {
+      res.status(400).json({ error: `change_type must be one of ${VALID_CHANGE_TYPES.join(', ')}` });
+      return;
+    }
+    const sourceType = body.source_type;
+    if (!VALID_SOURCE_TYPES.includes(sourceType)) {
+      res.status(400).json({ error: `source_type must be one of ${VALID_SOURCE_TYPES.join(', ')}` });
+      return;
+    }
+    // Source-specific minimums — these are the bare requirements for a
+    // legitimate physician order on file. Loose now; tighten if Renee
+    // calls out a gap.
+    if (sourceType === 'verbal') {
+      if (!body.source_physician || !body.source_obtained_at) {
+        res.status(400).json({ error: 'Verbal orders require physician and obtained-at timestamp.' });
+        return;
+      }
+    } else if (!body.source_description || String(body.source_description).trim() === '') {
+      res.status(400).json({ error: 'Pharmacy label and written-note sources require a description.' });
+      return;
+    }
+    if (!body.medication_name || String(body.medication_name).trim() === '') {
+      res.status(400).json({ error: 'medication_name is required.' });
+      return;
+    }
+
+    const row = await saveChangeOrder({
+      visit_id: visitId,
+      patient_id: ctx.patient.id,
+      scheduled_task_id: body.scheduled_task_id ?? null,
+      medication_name: String(body.medication_name).trim(),
+      change_type: changeType,
+      old_dose: body.old_dose ?? null,
+      old_route: body.old_route ?? null,
+      old_frequency: body.old_frequency ?? null,
+      new_dose: body.new_dose ?? null,
+      new_route: body.new_route ?? null,
+      new_frequency: body.new_frequency ?? null,
+      new_concentration: body.new_concentration ?? null,
+      new_indication: body.new_indication ?? null,
+      new_instructions: body.new_instructions ?? null,
+      reason: body.reason ?? null,
+      source_type: sourceType,
+      source_physician: body.source_physician ?? null,
+      source_obtained_at: body.source_obtained_at ?? null,
+      source_description: body.source_description ?? null,
+      initiated_by_nurse_id: ctx.visit.nurse_id,
+      notes: body.notes ?? null,
+    });
+
+    // Fax pipeline stub — in production this is where the integration
+    // call would happen. For the POC we just log so the demo can show a
+    // "would have faxed" trail without touching real infra.
+    console.log(`[fax stub] would have faxed change order ${row.id} (${row.medication_name} · ${row.change_type}) for signature`);
+
+    res.json(row);
+  } catch (err) {
+    console.error('[visits/change-orders POST] Error:', err);
+    res.status(500).json({ error: 'Failed to save change order' });
+  }
+});
+
+router.post('/:visitId/change-orders/:changeOrderId/mark-signed', async (req, res) => {
+  try {
+    const row = await markChangeOrderSigned(req.params.changeOrderId);
+    if (!row) {
+      res.status(404).json({ error: 'Change order not found or not pending signature.' });
+      return;
+    }
+    res.json(row);
+  } catch (err) {
+    console.error('[visits/change-orders POST mark-signed] Error:', err);
+    res.status(500).json({ error: 'Failed to mark change order signed' });
+  }
+});
+
+// ─── Seizure events ──────────────────────────────────────────
+// One row per event. The Activity Timeline and Seizure Log Sheet read
+// the GET; the form + Aria voice both POST. Mid-shift triggerable —
+// no "schedule slot" required because seizures aren't pre-planned.
+
+router.get('/:visitId/seizure-events', async (req, res) => {
+  try {
+    const events = await getSeizureEvents(req.params.visitId);
+    res.json(events);
+  } catch (err) {
+    console.error('[visits/seizure-events GET] Error:', err);
+    res.status(500).json({ error: 'Failed to fetch seizure events' });
+  }
+});
+
+router.post('/:visitId/seizure-events', async (req, res) => {
+  try {
+    const { visitId } = req.params;
+    const body = req.body ?? {};
+    // occurred_at from the form arrives as HH:MM — synthesize an ISO
+    // anchored to today so the timeline sorts cleanly alongside other
+    // events. Aria sends full ISO already; pass-through in that case.
+    let occurredAt = typeof body.occurred_at === 'string' ? body.occurred_at : '';
+    if (/^\d{2}:\d{2}$/.test(occurredAt)) {
+      const today = new Date().toISOString().slice(0, 10);
+      occurredAt = `${today}T${occurredAt}:00`;
+    }
+    const event = await saveSeizureEvent(visitId, {
+      occurred_at: occurredAt,
+      duration_seconds: body.duration_seconds,
+      seizure_type: body.seizure_type,
+      loc: body.loc,
+      intervention: body.intervention,
+      notes: body.notes,
+    });
+    res.json(event);
+  } catch (err) {
+    console.error('[visits/seizure-events POST] Error:', err);
+    res.status(500).json({ error: 'Failed to save seizure event' });
+  }
+});
+
+router.get('/:visitId/head-to-toe', async (req, res) => {
+  try {
+    const assessment = await getHeadToToe(req.params.visitId);
+    res.json({ systems_def: HEAD_TO_TOE_SYSTEMS, assessment });
+  } catch (err) {
+    console.error('[visits/head-to-toe GET] Error:', err);
+    res.status(500).json({ error: 'Failed to fetch head-to-toe assessment' });
+  }
+});
+
+router.post('/:visitId/head-to-toe', async (req, res) => {
+  try {
+    const { visitId } = req.params;
+    const body = req.body ?? {};
+    const mode = body.mode === 'checklist' ? 'checklist' : 'wdl';
+    const rawSystems = (body.systems && typeof body.systems === 'object') ? body.systems : {};
+
+    // Normalize: only accept known system ids; coerce each field shape
+    // so a malformed client payload never lands as junk in the JSONB.
+    const knownIds = new Set(HEAD_TO_TOE_SYSTEM_IDS);
+    const systems: Record<string, { wdl: boolean; exceptions: string[]; notes: string; details?: Record<string, unknown> }> = {};
+    for (const [id, val] of Object.entries(rawSystems as Record<string, unknown>)) {
+      if (!knownIds.has(id) || !val || typeof val !== 'object') continue;
+      const v = val as Record<string, unknown>;
+      systems[id] = {
+        wdl: v.wdl === true,
+        exceptions: Array.isArray(v.exceptions)
+          ? (v.exceptions as unknown[]).filter((x): x is string => typeof x === 'string')
+          : [],
+        notes: typeof v.notes === 'string' ? v.notes : '',
+        ...(v.details && typeof v.details === 'object' ? { details: v.details as Record<string, unknown> } : {}),
+      };
+    }
+
+    // At least one system finding must be present — otherwise the form
+    // is empty and the assessment is meaningless.
+    if (Object.keys(systems).length === 0) {
+      res.status(400).json({ error: 'At least one system finding is required.' });
+      return;
+    }
+
+    const summaryNotes = typeof body.summary_notes === 'string' && body.summary_notes.trim()
+      ? body.summary_notes.trim()
+      : null;
+    const saved = await saveHeadToToe(visitId, mode, systems, summaryNotes);
+    res.json(saved);
+  } catch (err) {
+    console.error('[visits/head-to-toe POST] Error:', err);
+    res.status(500).json({ error: 'Failed to save head-to-toe assessment' });
   }
 });
 

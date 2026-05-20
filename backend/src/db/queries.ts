@@ -13,7 +13,8 @@ export async function getPatientById(patientId: string): Promise<Patient | null>
             age_months, age_years, allergies, primary_diagnosis,
             cpr_code, last_weight_lbs, last_height_inches,
             last_vitals_date, emergency_contact_name,
-            emergency_contact_phone, emergency_contact_relation
+            emergency_contact_phone, emergency_contact_relation,
+            photo_url
      FROM patients WHERE id = $1`,
     [patientId],
   );
@@ -26,7 +27,8 @@ export async function getPatients(): Promise<Patient[]> {
             age_months, age_years, allergies, primary_diagnosis,
             cpr_code, last_weight_lbs, last_height_inches,
             last_vitals_date, emergency_contact_name,
-            emergency_contact_phone, emergency_contact_relation
+            emergency_contact_phone, emergency_contact_relation,
+            photo_url
      FROM patients ORDER BY full_name`,
   );
   return rows;
@@ -59,7 +61,8 @@ export async function getVisitWithPatient(visitId: string): Promise<{ visit: Vis
        p.age_months, p.age_years, p.allergies, p.primary_diagnosis,
        p.cpr_code, p.last_weight_lbs, p.last_height_inches,
        p.last_vitals_date, p.emergency_contact_name,
-       p.emergency_contact_phone, p.emergency_contact_relation
+       p.emergency_contact_phone, p.emergency_contact_relation,
+       p.photo_url
      FROM visits v
      JOIN patients p ON p.id = v.patient_id
      WHERE v.id = $1`,
@@ -95,6 +98,7 @@ export async function getVisitWithPatient(visitId: string): Promise<{ visit: Vis
     emergency_contact_name: r.emergency_contact_name,
     emergency_contact_phone: r.emergency_contact_phone,
     emergency_contact_relation: r.emergency_contact_relation,
+    photo_url: r.photo_url ?? null,
   };
   return { visit, patient };
 }
@@ -688,6 +692,10 @@ export async function searchPatientHistory(
 export interface PastVisitSearchOptions {
   patientId?: string;
   q?: string;
+  /** ISO yyyy-mm-dd lower bound, inclusive. */
+  from?: string;
+  /** ISO yyyy-mm-dd upper bound, inclusive. */
+  to?: string;
   limit?: number;
 }
 
@@ -701,7 +709,13 @@ export interface PastVisitRow {
   patient_id: string;
   patient_name: string;
   narrative_excerpt: string | null;
+  /** Source columns that matched `q`, when present. Used by the
+   *  frontend to render a "found in: narrative / meds / interventions"
+   *  badge so the nurse knows why a row came back. */
+  match_sources: string[];
 }
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export async function searchPastVisits(
   nurseId: string,
@@ -719,15 +733,40 @@ export async function searchPastVisits(
     where.push(`v.patient_id = $${params.length}`);
   }
 
+  if (opts.from && ISO_DATE_RE.test(opts.from)) {
+    params.push(opts.from);
+    where.push(`v.visit_date >= $${params.length}::date`);
+  }
+  if (opts.to && ISO_DATE_RE.test(opts.to)) {
+    params.push(opts.to);
+    where.push(`v.visit_date <= $${params.length}::date`);
+  }
+
+  // Text search now spans narrative content, patient name, medication
+  // names, AND intervention names — nurses asked for "where did I give
+  // Albuterol last week" / "find the visits with repositioning" without
+  // having to remember the narrative phrasing.
+  let matchClauses: { source: string; column: string }[] = [];
   if (opts.q && opts.q.trim()) {
     params.push(`%${opts.q.trim()}%`);
     const idx = params.length;
-    // Match on narrative content OR patient name; one ILIKE pattern, two columns.
-    where.push(`(n.content ILIKE $${idx} OR p.full_name ILIKE $${idx})`);
+    matchClauses = [
+      { source: 'narrative',    column: `n.content ILIKE $${idx}` },
+      { source: 'patient',      column: `p.full_name ILIKE $${idx}` },
+      { source: 'medication',   column: `EXISTS (SELECT 1 FROM medications m   WHERE m.visit_id = v.id AND m.name ILIKE $${idx})` },
+      { source: 'intervention', column: `EXISTS (SELECT 1 FROM interventions i WHERE i.visit_id = v.id AND i.name ILIKE $${idx})` },
+    ];
+    where.push(`(${matchClauses.map((c) => c.column).join(' OR ')})`);
   }
 
   const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
   params.push(limit);
+
+  // Project each match clause as a boolean alongside the row so the
+  // frontend can render a "matched in: …" hint without re-querying.
+  const matchProjection = matchClauses.length === 0
+    ? ''
+    : ',' + matchClauses.map((c, i) => `(${c.column}) AS match_${i}`).join(',');
 
   const { rows } = await pool.query(
     `SELECT v.id, v.visit_date,
@@ -735,6 +774,7 @@ export async function searchPastVisits(
             v.service_type, v.payer,
             v.patient_id, p.full_name AS patient_name,
             n.content AS narrative_excerpt
+            ${matchProjection}
      FROM visits v
      JOIN patients p ON p.id = v.patient_id
      LEFT JOIN narratives n ON n.visit_id = v.id
@@ -744,7 +784,24 @@ export async function searchPastVisits(
     params,
   );
 
-  return rows;
+  return rows.map((r: Record<string, unknown>) => {
+    const match_sources: string[] = [];
+    matchClauses.forEach((c, i) => {
+      if (r[`match_${i}`] === true) match_sources.push(c.source);
+    });
+    return {
+      id: r.id as string,
+      visit_date: r.visit_date as string,
+      planned_start_time: r.planned_start_time as string,
+      planned_end_time: r.planned_end_time as string,
+      service_type: r.service_type as string,
+      payer: (r.payer ?? null) as string | null,
+      patient_id: r.patient_id as string,
+      patient_name: r.patient_name as string,
+      narrative_excerpt: (r.narrative_excerpt ?? null) as string | null,
+      match_sources,
+    };
+  });
 }
 
 export async function getPrnOrders(patientId: string): Promise<PrnOrderRow[]> {
@@ -754,6 +811,315 @@ export async function getPrnOrders(patientId: string): Promise<PrnOrderRow[]> {
        FROM patient_prn_orders
       WHERE patient_id = $1 AND active = true
       ORDER BY medication`,
+    [patientId],
+  );
+  return rows;
+}
+
+// ─── Change orders ──────────────────────────────────────────
+// Nurse-initiated change requests, always backed by a physician
+// source. The "applied state" of an order is derived from `status` —
+// pending_signature and signed are both treated as live by the
+// schedule (the nurse documents against them immediately); cancelled
+// and discontinued are tombstones.
+
+export const VALID_CHANGE_TYPES = ['add', 'modify_dose', 'modify_route', 'modify_frequency', 'discontinue'] as const;
+export const VALID_SOURCE_TYPES = ['verbal', 'pharmacy_label', 'written_note'] as const;
+export const VALID_CO_STATUSES = ['pending_signature', 'signed', 'discontinued', 'cancelled'] as const;
+
+export interface ChangeOrderRow {
+  id: string;
+  visit_id: string;
+  patient_id: string;
+  scheduled_task_id: string | null;
+  medication_name: string;
+  change_type: (typeof VALID_CHANGE_TYPES)[number];
+  old_dose: string | null;
+  old_route: string | null;
+  old_frequency: string | null;
+  new_dose: string | null;
+  new_route: string | null;
+  new_frequency: string | null;
+  new_concentration: string | null;
+  new_indication: string | null;
+  new_instructions: string | null;
+  reason: string | null;
+  source_type: (typeof VALID_SOURCE_TYPES)[number];
+  source_physician: string | null;
+  source_obtained_at: string | null;
+  source_description: string | null;
+  initiated_by_nurse_id: string | null;
+  notes: string | null;
+  status: (typeof VALID_CO_STATUSES)[number];
+  fax_sent_at: string | null;
+  signed_at: string | null;
+  submitted_at: string;
+}
+
+export interface CreateChangeOrderInput {
+  visit_id: string;
+  patient_id: string;
+  scheduled_task_id?: string | null;
+  medication_name: string;
+  change_type: (typeof VALID_CHANGE_TYPES)[number];
+  old_dose?: string | null;
+  old_route?: string | null;
+  old_frequency?: string | null;
+  new_dose?: string | null;
+  new_route?: string | null;
+  new_frequency?: string | null;
+  new_concentration?: string | null;
+  new_indication?: string | null;
+  new_instructions?: string | null;
+  reason?: string | null;
+  source_type: (typeof VALID_SOURCE_TYPES)[number];
+  source_physician?: string | null;
+  source_obtained_at?: string | null;
+  source_description?: string | null;
+  initiated_by_nurse_id?: string | null;
+  notes?: string | null;
+}
+
+export async function saveChangeOrder(input: CreateChangeOrderInput): Promise<ChangeOrderRow> {
+  const { rows } = await pool.query(
+    `INSERT INTO change_orders (
+       visit_id, patient_id, scheduled_task_id, medication_name, change_type,
+       old_dose, old_route, old_frequency,
+       new_dose, new_route, new_frequency, new_concentration, new_indication, new_instructions,
+       reason, source_type, source_physician, source_obtained_at, source_description,
+       initiated_by_nurse_id, notes,
+       fax_sent_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21, now())
+     RETURNING *`,
+    [
+      input.visit_id, input.patient_id, input.scheduled_task_id ?? null,
+      input.medication_name, input.change_type,
+      input.old_dose ?? null, input.old_route ?? null, input.old_frequency ?? null,
+      input.new_dose ?? null, input.new_route ?? null, input.new_frequency ?? null,
+      input.new_concentration ?? null, input.new_indication ?? null, input.new_instructions ?? null,
+      input.reason ?? null,
+      input.source_type, input.source_physician ?? null, input.source_obtained_at ?? null, input.source_description ?? null,
+      input.initiated_by_nurse_id ?? null, input.notes ?? null,
+    ],
+  );
+  return rows[0];
+}
+
+export async function getChangeOrdersForVisit(visitId: string): Promise<ChangeOrderRow[]> {
+  const { rows } = await pool.query(
+    `SELECT * FROM change_orders WHERE visit_id = $1 ORDER BY submitted_at DESC`,
+    [visitId],
+  );
+  return rows;
+}
+
+export async function getChangeOrdersForPatient(
+  patientId: string,
+  opts: { status?: (typeof VALID_CO_STATUSES)[number] } = {},
+): Promise<ChangeOrderRow[]> {
+  const params: unknown[] = [patientId];
+  let where = `patient_id = $1`;
+  if (opts.status) {
+    params.push(opts.status);
+    where += ` AND status = $2`;
+  }
+  const { rows } = await pool.query(
+    `SELECT * FROM change_orders WHERE ${where} ORDER BY submitted_at DESC`,
+    params,
+  );
+  return rows;
+}
+
+export async function markChangeOrderSigned(id: string): Promise<ChangeOrderRow | null> {
+  const { rows } = await pool.query(
+    `UPDATE change_orders
+        SET status = 'signed', signed_at = now()
+      WHERE id = $1 AND status = 'pending_signature'
+      RETURNING *`,
+    [id],
+  );
+  return rows[0] ?? null;
+}
+
+// ─── Seizure events ──────────────────────────────────────────
+// Per-event rows so the chart slices cleanly. KanTime fields:
+// occurred_at, duration, type (Absence/Atonic/.../Tonic-Clonic/Other),
+// LOC (alert/oriented/lethargic), intervention, notes.
+
+export const VALID_SEIZURE_LOC = ['alert', 'oriented', 'lethargic'] as const;
+
+export interface SeizureEvent {
+  id: string;
+  visit_id: string;
+  occurred_at: string;
+  duration_seconds: number | null;
+  seizure_type: string | null;
+  loc: 'alert' | 'oriented' | 'lethargic' | null;
+  intervention: string | null;
+  notes: string | null;
+  recorded_at: string;
+}
+
+export async function saveSeizureEvent(
+  visitId: string,
+  data: Record<string, unknown>,
+): Promise<SeizureEvent> {
+  // occurred_at accepts HH:MM, full ISO, or HH:MM:SS — the WS handler
+  // already passes ISO when it comes from Aria; the form posts HH:MM
+  // and the route synthesizes a same-day ISO before insert.
+  const occurredAt = typeof data.occurred_at === 'string' ? data.occurred_at : null;
+  if (!occurredAt) throw new Error('occurred_at is required for seizure events');
+  const loc = data.loc as string | undefined;
+  if (loc && !VALID_SEIZURE_LOC.includes(loc as (typeof VALID_SEIZURE_LOC)[number])) {
+    throw new Error(`Invalid LOC "${loc}". Must be one of: ${VALID_SEIZURE_LOC.join(', ')}`);
+  }
+  const { rows } = await pool.query(
+    `INSERT INTO seizure_events (
+       visit_id, occurred_at, duration_seconds, seizure_type, loc, intervention, notes
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+     RETURNING *`,
+    [
+      visitId,
+      occurredAt,
+      data.duration_seconds != null ? Number(data.duration_seconds) : null,
+      data.seizure_type ?? null,
+      loc ?? null,
+      data.intervention ?? null,
+      data.notes ?? null,
+    ],
+  );
+  return rows[0];
+}
+
+export async function getSeizureEvents(visitId: string): Promise<SeizureEvent[]> {
+  const { rows } = await pool.query(
+    `SELECT * FROM seizure_events WHERE visit_id = $1 ORDER BY occurred_at`,
+    [visitId],
+  );
+  return rows;
+}
+
+// ─── Head-to-toe assessment ──────────────────────────────────
+// The first mandatory event of every visit. JSONB systems map lets the
+// shape evolve (WDL vs FL-checklist) without a schema migration. The
+// frontend close-out gate uses `getHeadToToe(visitId)` to decide
+// whether the visit can be signed off.
+
+export interface HeadToToeSystemFinding {
+  wdl: boolean;
+  exceptions: string[];
+  notes: string;
+  // Florida-style extras stored verbatim (lung sounds chips, skin color,
+  // etc.) — schema-free per-system fields. Optional so WDL-mode rows
+  // don't carry empty objects.
+  details?: Record<string, unknown>;
+}
+
+export interface HeadToToeAssessment {
+  id: string;
+  visit_id: string;
+  mode: 'wdl' | 'checklist';
+  systems: Record<string, HeadToToeSystemFinding>;
+  summary_notes: string | null;
+  completed_at: string;
+}
+
+export async function getHeadToToe(visitId: string): Promise<HeadToToeAssessment | null> {
+  const { rows } = await pool.query(
+    `SELECT id, visit_id, mode, systems, summary_notes, completed_at
+       FROM head_to_toe_assessments
+      WHERE visit_id = $1
+      LIMIT 1`,
+    [visitId],
+  );
+  return rows[0] ?? null;
+}
+
+export async function saveHeadToToe(
+  visitId: string,
+  mode: 'wdl' | 'checklist',
+  systems: Record<string, HeadToToeSystemFinding>,
+  summaryNotes: string | null,
+): Promise<HeadToToeAssessment> {
+  const { rows } = await pool.query(
+    `INSERT INTO head_to_toe_assessments
+       (visit_id, mode, systems, summary_notes)
+     VALUES ($1, $2, $3::jsonb, $4)
+     ON CONFLICT (visit_id) DO UPDATE SET
+       mode          = EXCLUDED.mode,
+       systems       = EXCLUDED.systems,
+       summary_notes = EXCLUDED.summary_notes,
+       completed_at  = now()
+     RETURNING id, visit_id, mode, systems, summary_notes, completed_at`,
+    [visitId, mode, JSON.stringify(systems), summaryNotes],
+  );
+  return rows[0];
+}
+
+// ─── Patient identification check ─────────────────────────────
+// Required step at visit start (regulatory). One row per visit; the
+// UNIQUE(visit_id) constraint enforces "at most one check per visit".
+// The frontend uses this to gate all other documentation.
+
+export interface IdentificationCheck {
+  id: string;
+  visit_id: string;
+  identifiers: string[];
+  confirmed_with: string | null;
+  notes: string | null;
+  confirmed_at: string;
+}
+
+export async function getIdentificationCheck(visitId: string): Promise<IdentificationCheck | null> {
+  const { rows } = await pool.query(
+    `SELECT id, visit_id, identifiers, confirmed_with, notes, confirmed_at
+       FROM patient_identification_checks
+      WHERE visit_id = $1
+      LIMIT 1`,
+    [visitId],
+  );
+  return rows[0] ?? null;
+}
+
+export async function saveIdentificationCheck(
+  visitId: string,
+  identifiers: string[],
+  confirmedWith: string | null,
+  notes: string | null,
+): Promise<IdentificationCheck> {
+  const { rows } = await pool.query(
+    `INSERT INTO patient_identification_checks
+       (visit_id, identifiers, confirmed_with, notes)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (visit_id) DO UPDATE SET
+       identifiers    = EXCLUDED.identifiers,
+       confirmed_with = EXCLUDED.confirmed_with,
+       notes          = EXCLUDED.notes,
+       confirmed_at   = now()
+     RETURNING id, visit_id, identifiers, confirmed_with, notes, confirmed_at`,
+    [visitId, identifiers, confirmedWith, notes],
+  );
+  return rows[0];
+}
+
+export interface PendingOrderChangeRow {
+  id: string;
+  patient_id: string;
+  change_type: 'added' | 'modified' | 'discontinued';
+  medication: string;
+  details: string;
+  reason: string | null;
+  signed_by: string | null;
+  signed_at: string;
+}
+
+export async function getPendingOrderChanges(patientId: string): Promise<PendingOrderChangeRow[]> {
+  const { rows } = await pool.query(
+    `SELECT id, patient_id, change_type, medication, details, reason,
+            signed_by, signed_at
+       FROM pending_order_changes
+      WHERE patient_id = $1
+      ORDER BY signed_at DESC`,
     [patientId],
   );
   return rows;

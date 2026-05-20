@@ -35,7 +35,7 @@ export type RecapHighlight =
   | { kind: 'abnormal_vital';    visitDate: string; metric: string; value: string; threshold: string }
   | { kind: 'narrative_keyword'; visitDate: string; keyword: string; excerpt: string };
 
-interface VitalThresholds {
+export interface VitalThresholds {
   hr?:   { low: number; high: number };
   rr?:   { low: number; high: number };
   temp?: { low: number; high: number };
@@ -69,7 +69,7 @@ const ADULT_THRESHOLDS: VitalThresholds = {
   bpSys:{ low: 90,  high: 180 },
 };
 
-function thresholdsFor(patient: Patient): VitalThresholds {
+export function thresholdsFor(patient: Patient): VitalThresholds {
   if (patient.age_months != null && patient.age_months < 12) return INFANT_THRESHOLDS;
   if (patient.age_years != null && patient.age_years <= 12)  return CHILD_THRESHOLDS;
   return ADULT_THRESHOLDS;
