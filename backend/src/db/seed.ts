@@ -408,9 +408,33 @@ export async function seed(): Promise<void> {
   const LIAM_VISIT = '20000000-0000-0000-0000-000000000003';
   const VISIT_DATE = todayString();
 
-  for (const tbl of ['vital_signs', 'medications', 'interventions']) {
+  // Every deploy: clear all per-visit work for Liam's current visit
+  // so nurses get a clean slate every time we redeploy on Railway.
+  // The order matters where there are FKs: child tables first.
+  // Tables added since the original 3-table list are included so the
+  // demo state stays deterministic regardless of how much testing
+  // happened on the prior build.
+  const PER_VISIT_TABLES = [
+    'vital_signs',
+    'medications',
+    'interventions',
+    'suction_events',
+    'seizure_events',
+    'patient_identification_checks',
+    'head_to_toe_assessments',
+    'conversation_messages',
+    'narratives',
+    'change_orders',
+  ];
+  for (const tbl of PER_VISIT_TABLES) {
     await pool.query(`DELETE FROM ${tbl} WHERE visit_id = $1`, [LIAM_VISIT]);
   }
+  // Patient-level cleanup: change orders that target this patient but
+  // aren't tied to a single visit (e.g. nurse-initiated "add new med").
+  await pool.query(
+    `DELETE FROM change_orders WHERE patient_id = $1`,
+    ['10000000-0000-0000-0000-000000000003'],
+  );
 
   // 08:05 — start-of-shift vitals (realistic pediatric readings)
   await pool.query(
