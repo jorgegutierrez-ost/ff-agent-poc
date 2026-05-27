@@ -484,21 +484,63 @@ export async function seed(): Promise<void> {
   // template tweaks (perturbations, narratives) propagate.
   await seedPastVisits();
 
+  // ── Next 30 days of scheduled visits ──────────────────────────────
+  // Ensures the patient list keeps returning today's visit even after
+  // the container has been running past midnight UTC. Without this,
+  // getVisitsByNurseId (WHERE visit_date = CURRENT_DATE) goes empty on
+  // day 2 of a deploy.
+  await seedFutureVisits();
+
   console.log('[seed] Database seeded successfully');
 }
 
-const LIAM_ID   = '10000000-0000-0000-0000-000000000003';
-const PAST_DAYS = 30;
+const LIAM_ID     = '10000000-0000-0000-0000-000000000003';
+const PAST_DAYS   = 30;
+const FUTURE_DAYS = 30;
 
 function pastVisitId(dayOffset: number): string {
   // Deterministic UUID per day so re-runs upsert cleanly.
   return `21000000-0000-0000-0000-${dayOffset.toString(16).padStart(12, '0')}`;
 }
 
+function futureVisitId(dayOffset: number): string {
+  // 22XXX prefix keeps future-visit IDs distinct from today's (20XXX)
+  // and past visits (21XXX) so all three sets can upsert independently.
+  return `22000000-0000-0000-0000-${dayOffset.toString(16).padStart(12, '0')}`;
+}
+
 function dateMinus(days: number): string {
   const d = new Date();
   d.setDate(d.getDate() - days);
   return d.toISOString().split('T')[0];
+}
+
+function datePlus(days: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return d.toISOString().split('T')[0];
+}
+
+async function seedFutureVisits(): Promise<void> {
+  for (let dayOffset = 1; dayOffset <= FUTURE_DAYS; dayOffset++) {
+    const vId = futureVisitId(dayOffset);
+    const visitDate = datePlus(dayOffset);
+    await pool.query(
+      `INSERT INTO visits (
+         id, patient_id, nurse_id, visit_date, planned_start_time,
+         planned_end_time, service_type, payer, status
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       ON CONFLICT (id) DO UPDATE SET
+         visit_date         = EXCLUDED.visit_date,
+         status             = EXCLUDED.status,
+         planned_start_time = EXCLUDED.planned_start_time,
+         planned_end_time   = EXCLUDED.planned_end_time`,
+      [
+        vId, LIAM_ID, NURSE.id, visitDate, '08:00', '16:00',
+        'RN Hourly', 'Medicaid', 'scheduled',
+      ],
+    );
+  }
 }
 
 function shiftTime(start: string, addMinutes: number): string {
