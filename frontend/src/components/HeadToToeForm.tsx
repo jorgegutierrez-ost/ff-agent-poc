@@ -89,15 +89,11 @@ export default function HeadToToeForm({ item, visitId, onSubmit, onCancel }: Hea
     };
   }, [visitId]);
 
-  // Three running counts so the header shows the assessment state at a
-  // glance. The submit button uses `unreviewedCount === 0` as its
-  // ready-check; the chat handoff uses `flaggedCount` for the summary.
-  const reviewedCount   = useMemo(() => Object.values(findings).filter((f) => findingState(f) !== 'unreviewed').length, [findings]);
-  const wdlCount        = useMemo(() => Object.values(findings).filter((f) => findingState(f) === 'wdl').length, [findings]);
-  const flaggedCount    = useMemo(() => Object.values(findings).filter((f) => findingState(f) === 'flagged').length, [findings]);
-  const unreviewedCount = (systemsDef?.length ?? 0) - reviewedCount;
-  // Kept for the outgoing payload to the chat handoff (counts of
-  // non-WDL systems). Same as flaggedCount in the new model.
+  // Flagged-system count drives the header line and the chat handoff
+  // summary. wdlCount / unreviewedCount were planned for a ready-check
+  // gate that never landed — keep the count derivation simple and drop
+  // unused locals so the build doesn't fail under noUnusedLocals.
+  const flaggedCount   = useMemo(() => Object.values(findings).filter((f) => findingState(f) === 'flagged').length, [findings]);
   const exceptionCount = flaggedCount;
 
   function update(id: string, patch: Partial<SystemFinding>) {
