@@ -3,6 +3,7 @@ import PatientListPage from './components/PatientListPage';
 import VisitPage from './components/VisitPage';
 import PastVisitsPage from './components/PastVisitsPage';
 import NavSidebar from './components/NavSidebar';
+import { ATTENTION_ITEMS } from './lib/dashboardMocks';
 import { useChat } from './hooks/useChat';
 import { API_BASE } from './config';
 import type { Patient, Visit } from './types';
@@ -71,7 +72,11 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-white font-sans text-gray-900 antialiased">
-      <NavSidebar activePage={page} onNavigate={handleNavigate} />
+      <NavSidebar
+        activePage={page}
+        onNavigate={handleNavigate}
+        attentionCount={ATTENTION_ITEMS.filter((i) => i.severity === 'overdue').length}
+      />
 
       {page === 'patients' && (
         <PatientListPage

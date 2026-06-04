@@ -35,7 +35,24 @@ interface HeadToToeFormProps {
 }
 
 function emptyFinding(): SystemFinding {
-  return { wdl: true, exceptions: [], notes: '' };
+  // Per nurse-panel feedback: every system starts UNREVIEWED — the
+  // nurse must actively look at each one and either confirm WDL or
+  // flag exceptions. Defaulting to wdl=true was treating "not yet
+  // checked" as "normal", which is the opposite of what an
+  // assessment should do.
+  return { wdl: false, exceptions: [], notes: '' };
+}
+
+/** Tri-state derived from a finding for the visual treatment.
+ *  - unreviewed: nurse hasn't touched this row yet
+ *  - wdl: explicitly marked within defined limits
+ *  - flagged: explicitly marked with one or more exceptions/notes
+ */
+function findingState(f: SystemFinding | undefined): 'unreviewed' | 'wdl' | 'flagged' {
+  if (!f) return 'unreviewed';
+  if (f.wdl) return 'wdl';
+  if (f.exceptions.length > 0 || f.notes.trim()) return 'flagged';
+  return 'unreviewed';
 }
 
 export default function HeadToToeForm({ item, visitId, onSubmit, onCancel }: HeadToToeFormProps) {
@@ -72,10 +89,16 @@ export default function HeadToToeForm({ item, visitId, onSubmit, onCancel }: Hea
     };
   }, [visitId]);
 
-  const exceptionCount = useMemo(
-    () => Object.values(findings).filter((f) => !f.wdl || f.exceptions.length > 0).length,
-    [findings],
-  );
+  // Three running counts so the header shows the assessment state at a
+  // glance. The submit button uses `unreviewedCount === 0` as its
+  // ready-check; the chat handoff uses `flaggedCount` for the summary.
+  const reviewedCount   = useMemo(() => Object.values(findings).filter((f) => findingState(f) !== 'unreviewed').length, [findings]);
+  const wdlCount        = useMemo(() => Object.values(findings).filter((f) => findingState(f) === 'wdl').length, [findings]);
+  const flaggedCount    = useMemo(() => Object.values(findings).filter((f) => findingState(f) === 'flagged').length, [findings]);
+  const unreviewedCount = (systemsDef?.length ?? 0) - reviewedCount;
+  // Kept for the outgoing payload to the chat handoff (counts of
+  // non-WDL systems). Same as flaggedCount in the new model.
+  const exceptionCount = flaggedCount;
 
   function update(id: string, patch: Partial<SystemFinding>) {
     setFindings((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }));
@@ -96,9 +119,14 @@ export default function HeadToToeForm({ item, visitId, onSubmit, onCancel }: Hea
   }
 
   function markAllWdl() {
+    // emptyFinding() now returns wdl=false (so every system starts
+    // unreviewed); this shortcut explicitly flips every row to WDL
+    // and clears any exceptions/notes the nurse may have entered.
     setFindings((prev) => {
       const next: Record<string, SystemFinding> = {};
-      for (const id of Object.keys(prev)) next[id] = emptyFinding();
+      for (const id of Object.keys(prev)) {
+        next[id] = { wdl: true, exceptions: [], notes: '' };
+      }
       return next;
     });
   }

@@ -1,3 +1,27 @@
+// Make sure the dose string has a visible unit. Some change-orders /
+// verbal orders come in as bare numbers ("13") which read ambiguously
+// — "Give 13" doesn't tell the nurse 13 of what. We infer the unit
+// from the concentration's leading token (e.g. "5 mg / 5 mL" → mg)
+// and append it. If we can't infer, we return the dose unchanged
+// rather than guessing.
+const KNOWN_UNIT_RE =
+  /\b(mcg|µg|mg|g|kg|ml|l|unit|units|iu|drops?|tabs?|tablets?|scoops?|caps?|capsules?|sprays?|puffs?|supp(?:ository)?|inhalation|pill|pills|spr|chewable|chewables)\b/i;
+
+export function ensureDoseUnit(
+  dose?: string | null,
+  concentration?: string | null,
+): string {
+  if (!dose) return '';
+  const trimmed = dose.trim();
+  if (!trimmed) return '';
+  if (KNOWN_UNIT_RE.test(trimmed)) return trimmed;
+  if (concentration) {
+    const m = /^\s*\d+(?:\.\d+)?\s*([a-zA-Zµ]+)/.exec(concentration);
+    if (m && m[1]) return `${trimmed} ${m[1]}`;
+  }
+  return trimmed;
+}
+
 // Canonical medication line shared by every place that displays a med:
 // schedule cards, the activity timeline, the chat confirmation header,
 // the PRN tab, and the patient detail sidebar's PRN section.

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { ScheduleItem } from '../types';
 import { buildMedLine } from '../lib/medicationFormat';
 import { API_BASE } from '../config';
+import { HQ_CONTACT, physicianForPatient, telHref } from '../lib/orgContacts';
 import {
   type DatedReading,
   type Metric,
@@ -588,53 +589,63 @@ export function MedicationForm({ item, action, onSubmit, onCancel }: MedicationF
 
 // ─── Change Order Form ───────────────────────────────────────────
 //
-// Real KanTime-style workflow: nurse documents the physician-authorized
-// change with a required source (verbal / pharmacy label / written
-// note), the new dose/route/frequency, and submits. The fax pipeline is
-// stubbed server-side; the schedule card flips to the new values
-// immediately so the nurse can document against the new order without
-// waiting for the signature.
+// Submit-first verbal-order workflow per James (2026-06-03). The
+// nurse fills the request, hits submit, and is then prompted with a
+// phone card to call HQ or the physician on file for verbal approval.
+// Nurses cannot finalize the change independently — the physician
+// name and obtained-at timestamp are recorded by a follow-up POST to
+// /log-verbal AFTER the call, not as a precondition to submit.
 //
-// Per Renee/Nichole's meeting: a nurse must not be able to change a
-// dose/route on her own — the source-of-authority section gates submit.
+// Three phases, all rendered in one mounted form:
+//   1. request          — change-type + new-value fields, then submit
+//   2. awaiting_verbal  — HQ + physician phone cards, then "log verbal"
+//   3. verbal_logged    — confirmation + Done
+//
+// The schedule flips immediately on phase-1 submit (per nurse
+// feedback: she shouldn't have to wait for the verbal to start
+// documenting against the new order). The verbal step is the
+// audit-trail completion, not a gate.
 
 type ChangeOrderType = 'add' | 'modify_dose' | 'modify_route' | 'modify_frequency' | 'discontinue';
-type ChangeOrderSource = 'verbal' | 'pharmacy_label' | 'written_note';
+type ChangeOrderPhase = 'request' | 'awaiting_verbal' | 'verbal_logged';
 
 const CHANGE_TYPE_OPTIONS: Array<{ value: ChangeOrderType; label: string; hint: string }> = [
   { value: 'modify_dose',      label: 'Modify dose',      hint: 'New dose for an existing order.' },
   { value: 'modify_route',     label: 'Modify route',     hint: 'Same drug, new route.' },
   { value: 'modify_frequency', label: 'Modify frequency', hint: 'Same drug + dose, new schedule.' },
   { value: 'discontinue',      label: 'Discontinue',      hint: 'Stop this medication.' },
-  { value: 'add',              label: 'Add new med',      hint: 'Brand new order — needs full source.' },
-];
-
-const SOURCE_OPTIONS: Array<{ value: ChangeOrderSource; label: string }> = [
-  { value: 'verbal',         label: 'Verbal from physician' },
-  { value: 'pharmacy_label', label: 'Pharmacy label' },
-  { value: 'written_note',   label: 'Written note (office visit)' },
+  { value: 'add',              label: 'Add new med',      hint: 'Brand new order.' },
 ];
 
 interface ChangeOrderFormProps {
   item: ScheduleItem;
   visitId: string;
+  /** Patient id drives the physician-on-file lookup for the phone card. */
+  patientId: string;
   /** Set to true when the form is opened from the "+ New change order"
    *  header button rather than from a specific med card. We drop the
    *  pre-filled medication name and require the nurse to type it in. */
   isHeaderInitiated?: boolean;
-  /** Fired with the saved change-order payload so the visit page can
-   *  flip the matching schedule item in-state without a full refetch. */
+  /** Fired once on phase-1 submit so the parent can flip the schedule
+   *  + send the chat message. Parent must NOT close the form on this
+   *  event — the form stays mounted to drive the verbal-call phase. */
   onSubmit: (item: ScheduleItem, data: Record<string, string>) => void;
+  /** Fired when the form is done (cancelled, or after verbal logged
+   *  + Done). Parent closes it here. */
   onCancel: () => void;
 }
 
 export function ChangeOrderForm({
   item,
   visitId,
+  patientId,
   isHeaderInitiated = false,
   onSubmit,
   onCancel,
 }: ChangeOrderFormProps) {
+  const [phase, setPhase] = useState<ChangeOrderPhase>('request');
+  const [savedOrderId, setSavedOrderId] = useState<string | null>(null);
+
   // Default change type depends on entry point: header → add new med;
   // card tap → modify dose (the common case).
   const [changeType, setChangeType] = useState<ChangeOrderType>(
@@ -648,33 +659,29 @@ export function ChangeOrderForm({
   const [newIndication, setNewIndication] = useState('');
   const [newInstructions, setNewInstructions] = useState('');
   const [reason, setReason] = useState('');
-
-  const [sourceType, setSourceType] = useState<ChangeOrderSource>('verbal');
-  const [sourcePhysician, setSourcePhysician] = useState('');
-  const [sourceTime, setSourceTime] = useState<string>(nowHHMM);
-  const [sourceDescription, setSourceDescription] = useState('');
-
   const [notes, setNotes] = useState('');
+
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Phase-2 (verbal logging) local state.
+  const physician = physicianForPatient(patientId);
+  const [contactCalled, setContactCalled] = useState<'hq' | 'physician'>('hq');
+  const [verbalTime, setVerbalTime] = useState<string>(nowHHMM);
+  const [verbalNote, setVerbalNote] = useState('');
+  const [loggingVerbal, setLoggingVerbal] = useState(false);
+
   // Which "new value" fields are required for each change type.
   const requires = (field: 'dose' | 'route' | 'frequency'): boolean => {
-    if (changeType === 'add') return field === 'dose'; // add at minimum needs a dose
+    if (changeType === 'add') return field === 'dose';
     if (changeType === 'modify_dose')      return field === 'dose';
     if (changeType === 'modify_route')     return field === 'route';
     if (changeType === 'modify_frequency') return field === 'frequency';
     return false;
   };
 
-  function sourceComplete(): boolean {
-    if (sourceType === 'verbal') return sourcePhysician.trim() !== '' && HHMM_RE.test(sourceTime.trim());
-    return sourceDescription.trim() !== '';
-  }
-
   function readyToSubmit(): boolean {
     if (!medName.trim()) return false;
-    if (!sourceComplete()) return false;
     if (changeType === 'modify_dose'      && !newDose.trim())  return false;
     if (changeType === 'modify_route'     && !newRoute.trim()) return false;
     if (changeType === 'modify_frequency' && !newFreq.trim())  return false;
@@ -682,19 +689,11 @@ export function ChangeOrderForm({
     return true;
   }
 
-  async function handleSubmit() {
+  async function handleSubmitRequest() {
     if (!readyToSubmit() || submitting) return;
     setError(null);
     setSubmitting(true);
     try {
-      // Synthesize an ISO timestamp for the verbal source when the
-      // nurse only entered HH:MM. The backend tolerates either, but
-      // storing ISO keeps the audit trail sortable.
-      let sourceObtainedAt: string | null = null;
-      if (sourceType === 'verbal' && HHMM_RE.test(sourceTime.trim())) {
-        const today = new Date().toISOString().slice(0, 10);
-        sourceObtainedAt = `${today}T${sourceTime.trim()}:00`;
-      }
       const payload = {
         scheduled_task_id: isHeaderInitiated ? null : item.id,
         medication_name: medName.trim(),
@@ -709,10 +708,12 @@ export function ChangeOrderForm({
         new_indication: newIndication.trim() || null,
         new_instructions: newInstructions.trim() || null,
         reason: reason.trim() || null,
-        source_type: sourceType,
-        source_physician: sourceType === 'verbal' ? sourcePhysician.trim() : null,
-        source_obtained_at: sourceObtainedAt,
-        source_description: sourceType === 'verbal' ? null : sourceDescription.trim(),
+        // Submit-first: source is verbal, but physician + obtained_at
+        // come in phase 2. Backend now accepts null for both.
+        source_type: 'verbal',
+        source_physician: null,
+        source_obtained_at: null,
+        source_description: null,
         notes: notes.trim() || null,
       };
       const resp = await fetch(`${API_BASE}/api/visits/${visitId}/change-orders`, {
@@ -724,6 +725,12 @@ export function ChangeOrderForm({
         const detail = await resp.json().catch(() => null);
         throw new Error(detail?.error ?? 'Could not save change order.');
       }
+      const saved = await resp.json();
+      setSavedOrderId(saved.id);
+
+      // Notify parent so the schedule flips + chat message goes out.
+      // Parent must NOT close the form on this event — see VisitPage's
+      // handleFormSubmit branch for change_order_submitted.
       onSubmit(item, {
         action: 'change_order_submitted',
         medication_name: payload.medication_name,
@@ -731,10 +738,9 @@ export function ChangeOrderForm({
         new_dose: payload.new_dose ?? '',
         new_route: payload.new_route ?? '',
         new_frequency: payload.new_frequency ?? '',
-        source_type: sourceType,
-        source_physician: payload.source_physician ?? '',
-        source_obtained_at: sourceObtainedAt ?? '',
       });
+
+      setPhase('awaiting_verbal');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not save change order.');
     } finally {
@@ -742,277 +748,465 @@ export function ChangeOrderForm({
     }
   }
 
-  return (
-    <div className="rounded-xl border border-gray-200 bg-white p-4">
-      <div className="mb-3 flex items-center justify-between">
-        <h4 className="text-sm font-semibold text-gray-900">Change Order</h4>
-        <button onClick={onCancel} className="text-gray-400 hover:text-gray-600">
-          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
-          </svg>
-        </button>
-      </div>
+  async function handleLogVerbal() {
+    if (!savedOrderId || loggingVerbal) return;
+    if (!HHMM_RE.test(verbalTime.trim())) {
+      setError('Enter a valid time (HH:MM).');
+      return;
+    }
+    setError(null);
+    setLoggingVerbal(true);
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const obtainedAt = `${today}T${verbalTime.trim()}:00`;
+      const physicianName = contactCalled === 'hq'
+        ? `${HQ_CONTACT.name} (relay)`
+        : physician.name;
+      const resp = await fetch(
+        `${API_BASE}/api/visits/${visitId}/change-orders/${savedOrderId}/log-verbal`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            source_physician: physicianName,
+            source_obtained_at: obtainedAt,
+            contact_called: contactCalled,
+            notes: verbalNote.trim() || null,
+          }),
+        },
+      );
+      if (!resp.ok) {
+        const detail = await resp.json().catch(() => null);
+        throw new Error(detail?.error ?? 'Could not log verbal approval.');
+      }
+      setPhase('verbal_logged');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not log verbal approval.');
+    } finally {
+      setLoggingVerbal(false);
+    }
+  }
 
-      {/* Pre-change snapshot. Reminds the nurse what she's replacing. */}
-      {!isHeaderInitiated && <ScheduledHeader item={item} />}
-
-      {/* SECTION 1 — Source of authority (required, gates submit) */}
-      <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5">
-        <p className="mb-2 text-[10px] font-semibold tracking-widest text-amber-800 uppercase">
-          1 · Source of authority <span className="text-amber-600">(required)</span>
-        </p>
-        <p className="mb-2 text-[11px] leading-snug text-amber-900">
-          Nurses cannot change orders independently. Document where the
-          authorization came from.
-        </p>
-
-        <div className="mb-2 flex flex-wrap gap-1.5">
-          {SOURCE_OPTIONS.map((s) => (
-            <button
-              key={s.value}
-              type="button"
-              onClick={() => setSourceType(s.value)}
-              className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
-                sourceType === s.value
-                  ? 'bg-amber-700 text-white'
-                  : 'bg-white text-amber-900 ring-1 ring-amber-300 hover:bg-amber-100'
-              }`}
-            >
-              {s.label}
-            </button>
-          ))}
-        </div>
-
-        {sourceType === 'verbal' && (
-          <div className="space-y-2">
-            <div>
-              <label className="mb-0.5 block text-[10px] font-medium text-amber-900 uppercase">
-                Physician <span className="text-amber-700">*</span>
-              </label>
-              <input
-                type="text"
-                value={sourcePhysician}
-                onChange={(e) => setSourcePhysician(e.target.value)}
-                placeholder="e.g. Dr. Patel"
-                className="w-full rounded-md border border-amber-300 bg-white px-2.5 py-1.5 text-xs text-gray-900 placeholder-amber-400 outline-none focus:border-amber-500"
-              />
-            </div>
-            <div>
-              <label className="mb-0.5 block text-[10px] font-medium text-amber-900 uppercase">
-                Verbal obtained at <span className="text-amber-700">*</span>
-              </label>
-              <input
-                type="time"
-                value={sourceTime}
-                onChange={(e) => setSourceTime(e.target.value)}
-                className="rounded-md border border-amber-300 bg-white px-2.5 py-1.5 text-xs tabular-nums text-gray-900 outline-none focus:border-amber-500"
-              />
-            </div>
-          </div>
-        )}
-
-        {sourceType !== 'verbal' && (
+  // ─── Render: PHASE 1 — request ───────────────────────────────
+  if (phase === 'request') {
+    return (
+      <div className="rounded-xl border border-gray-200 bg-white p-4">
+        <div className="mb-3 flex items-center justify-between">
           <div>
-            <label className="mb-0.5 block text-[10px] font-medium text-amber-900 uppercase">
-              {sourceType === 'pharmacy_label' ? 'Label details / pharmacy' : 'Note details / office visit date'}{' '}
-              <span className="text-amber-700">*</span>
-            </label>
-            <input
-              type="text"
-              value={sourceDescription}
-              onChange={(e) => setSourceDescription(e.target.value)}
-              placeholder={
-                sourceType === 'pharmacy_label'
-                  ? 'e.g. CVS label, filled 5/19, Rx#7842'
-                  : 'e.g. Office visit 5/19 — note from Dr. Patel'
-              }
-              className="w-full rounded-md border border-amber-300 bg-white px-2.5 py-1.5 text-xs text-gray-900 placeholder-amber-400 outline-none focus:border-amber-500"
-            />
+            <h4 className="text-sm font-semibold text-gray-900">Request order change</h4>
+            <p className="mt-0.5 text-[11px] text-gray-500">
+              Submit, then call HQ or the physician for verbal approval.
+            </p>
           </div>
-        )}
-      </div>
-
-      {/* SECTION 2 — The change */}
-      <div className="mb-4">
-        <p className="mb-2 text-[10px] font-semibold tracking-widest text-gray-500 uppercase">
-          2 · The change
-        </p>
-
-        <label className="mb-1 block text-[11px] font-medium text-gray-600 uppercase">
-          Medication <span className="text-red-500">*</span>
-        </label>
-        <input
-          type="text"
-          value={medName}
-          onChange={(e) => setMedName(e.target.value)}
-          disabled={!isHeaderInitiated}
-          placeholder={isHeaderInitiated ? 'Drug name' : ''}
-          className={`mb-3 w-full rounded-lg border px-3 py-2 text-sm outline-none ${
-            isHeaderInitiated
-              ? 'border-gray-200 bg-gray-50 text-gray-900 focus:border-gray-300 focus:bg-white'
-              : 'border-gray-100 bg-gray-100 text-gray-600'
-          }`}
-        />
-
-        <label className="mb-1 block text-[11px] font-medium text-gray-600 uppercase">
-          Change type
-        </label>
-        <div className="mb-3 flex flex-wrap gap-1.5">
-          {CHANGE_TYPE_OPTIONS
-            .filter((o) => isHeaderInitiated || o.value !== 'add')
-            .map((o) => (
-              <button
-                key={o.value}
-                type="button"
-                onClick={() => setChangeType(o.value)}
-                title={o.hint}
-                className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
-                  changeType === o.value
-                    ? 'bg-gray-900 text-white'
-                    : 'bg-white text-gray-700 ring-1 ring-gray-200 hover:bg-gray-50'
-                }`}
-              >
-                {o.label}
-              </button>
-            ))}
+          <button onClick={onCancel} className="text-gray-400 hover:text-gray-600">
+            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+            </svg>
+          </button>
         </div>
 
-        {/* New-value inputs — only render the fields that the chosen
-            change type cares about. Discontinue has none. */}
-        {changeType !== 'discontinue' && (
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
-                New dose {requires('dose') && <span className="text-red-500">*</span>}
-              </label>
-              <input
-                type="text"
-                value={newDose}
-                onChange={(e) => setNewDose(e.target.value)}
-                placeholder="e.g. 7.5 mg"
-                className="w-full rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300 focus:bg-white"
-              />
-            </div>
-            <div>
-              <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
-                New route {requires('route') && <span className="text-red-500">*</span>}
-              </label>
-              <input
-                type="text"
-                value={newRoute}
-                onChange={(e) => setNewRoute(e.target.value)}
-                placeholder="e.g. Oral"
-                className="w-full rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300 focus:bg-white"
-              />
-            </div>
-            <div>
-              <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
-                New frequency {requires('frequency') && <span className="text-red-500">*</span>}
-              </label>
-              <input
-                type="text"
-                value={newFreq}
-                onChange={(e) => setNewFreq(e.target.value)}
-                placeholder="e.g. Three times daily"
-                className="w-full rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300 focus:bg-white"
-              />
-            </div>
-            <div>
-              <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
-                New concentration
-              </label>
-              <input
-                type="text"
-                value={newConcentration}
-                onChange={(e) => setNewConcentration(e.target.value)}
-                placeholder="e.g. 5 mg / 5 mL"
-                className="w-full rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300 focus:bg-white"
-              />
-            </div>
-          </div>
-        )}
+        {!isHeaderInitiated && <ScheduledHeader item={item} />}
 
-        {changeType === 'add' && (
-          <div className="mt-2 grid grid-cols-1 gap-2">
-            <div>
-              <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
-                Indication
-              </label>
-              <input
-                type="text"
-                value={newIndication}
-                onChange={(e) => setNewIndication(e.target.value)}
-                placeholder="What is this med for?"
-                className="w-full rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300 focus:bg-white"
-              />
-            </div>
-            <div>
-              <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
-                Special instructions
-              </label>
-              <input
-                type="text"
-                value={newInstructions}
-                onChange={(e) => setNewInstructions(e.target.value)}
-                placeholder="e.g. Give 30 min before meals"
-                className="w-full rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300 focus:bg-white"
-              />
-            </div>
-          </div>
-        )}
+        {/* Verbal-workflow notice — replaces the old source-of-authority box. */}
+        <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5">
+          <p className="text-[11px] leading-snug text-amber-900">
+            <span className="font-semibold">Verbal order workflow.</span> Nurses
+            cannot finalize an order change directly. Submit the request below,
+            then the next screen will prompt you to call HQ or the physician on
+            file to obtain verbal approval.
+          </p>
+        </div>
 
-        <div className="mt-2">
-          <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
-            Reason for change
+        <div className="mb-4">
+          <p className="mb-2 text-[10px] font-semibold tracking-widest text-gray-500 uppercase">
+            The change
+          </p>
+
+          <label className="mb-1 block text-[11px] font-medium text-gray-600 uppercase">
+            Medication <span className="text-red-500">*</span>
           </label>
           <input
             type="text"
-            value={reason}
-            onChange={(e) => setReason(e.target.value)}
-            placeholder="e.g. Worsening spasticity per parent"
+            value={medName}
+            onChange={(e) => setMedName(e.target.value)}
+            disabled={!isHeaderInitiated}
+            placeholder={isHeaderInitiated ? 'Drug name' : ''}
+            className={`mb-3 w-full rounded-lg border px-3 py-2 text-sm outline-none ${
+              isHeaderInitiated
+                ? 'border-gray-200 bg-gray-50 text-gray-900 focus:border-gray-300 focus:bg-white'
+                : 'border-gray-100 bg-gray-100 text-gray-600'
+            }`}
+          />
+
+          <label className="mb-1 block text-[11px] font-medium text-gray-600 uppercase">
+            Change type
+          </label>
+          <div className="mb-3 flex flex-wrap gap-1.5">
+            {CHANGE_TYPE_OPTIONS
+              .filter((o) => isHeaderInitiated || o.value !== 'add')
+              .map((o) => (
+                <button
+                  key={o.value}
+                  type="button"
+                  onClick={() => setChangeType(o.value)}
+                  title={o.hint}
+                  className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                    changeType === o.value
+                      ? 'bg-gray-900 text-white'
+                      : 'bg-white text-gray-700 ring-1 ring-gray-200 hover:bg-gray-50'
+                  }`}
+                >
+                  {o.label}
+                </button>
+              ))}
+          </div>
+
+          {changeType !== 'discontinue' && (
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
+                  New dose {requires('dose') && <span className="text-red-500">*</span>}
+                </label>
+                <input
+                  type="text"
+                  value={newDose}
+                  onChange={(e) => setNewDose(e.target.value)}
+                  placeholder="e.g. 7.5 mg"
+                  className="w-full rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300 focus:bg-white"
+                />
+              </div>
+              <div>
+                <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
+                  New route {requires('route') && <span className="text-red-500">*</span>}
+                </label>
+                <input
+                  type="text"
+                  value={newRoute}
+                  onChange={(e) => setNewRoute(e.target.value)}
+                  placeholder="e.g. Oral"
+                  className="w-full rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300 focus:bg-white"
+                />
+              </div>
+              <div>
+                <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
+                  New frequency {requires('frequency') && <span className="text-red-500">*</span>}
+                </label>
+                <input
+                  type="text"
+                  value={newFreq}
+                  onChange={(e) => setNewFreq(e.target.value)}
+                  placeholder="e.g. Three times daily"
+                  className="w-full rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300 focus:bg-white"
+                />
+              </div>
+              <div>
+                <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
+                  New concentration
+                </label>
+                <input
+                  type="text"
+                  value={newConcentration}
+                  onChange={(e) => setNewConcentration(e.target.value)}
+                  placeholder="e.g. 5 mg / 5 mL"
+                  className="w-full rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300 focus:bg-white"
+                />
+              </div>
+            </div>
+          )}
+
+          {changeType === 'add' && (
+            <div className="mt-2 grid grid-cols-1 gap-2">
+              <div>
+                <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
+                  Indication
+                </label>
+                <input
+                  type="text"
+                  value={newIndication}
+                  onChange={(e) => setNewIndication(e.target.value)}
+                  placeholder="What is this med for?"
+                  className="w-full rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300 focus:bg-white"
+                />
+              </div>
+              <div>
+                <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
+                  Special instructions
+                </label>
+                <input
+                  type="text"
+                  value={newInstructions}
+                  onChange={(e) => setNewInstructions(e.target.value)}
+                  placeholder="e.g. Give 30 min before meals"
+                  className="w-full rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300 focus:bg-white"
+                />
+              </div>
+            </div>
+          )}
+
+          <div className="mt-2">
+            <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
+              Reason for change
+            </label>
+            <input
+              type="text"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="e.g. Worsening spasticity per parent"
+              className="w-full rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300 focus:bg-white"
+            />
+          </div>
+        </div>
+
+        <div className="mb-3">
+          <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
+            Notes <span className="font-normal normal-case text-gray-400">(optional)</span>
+          </label>
+          <input
+            type="text"
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            placeholder="Anything else the office should know"
             className="w-full rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300 focus:bg-white"
           />
         </div>
-      </div>
 
-      {/* SECTION 3 — Notes + submit */}
-      <div className="mb-3">
-        <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
-          Notes <span className="font-normal normal-case text-gray-400">(optional)</span>
-        </label>
-        <input
-          type="text"
-          value={notes}
-          onChange={(e) => setNotes(e.target.value)}
-          placeholder="Anything else the office should know"
-          className="w-full rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300 focus:bg-white"
-        />
-      </div>
+        {error && (
+          <p className="mb-2 rounded-md border border-rose-200 bg-rose-50 px-2 py-1.5 text-[11px] text-rose-700">
+            {error}
+          </p>
+        )}
 
-      <p className="mb-3 text-[10px] leading-snug text-gray-500">
-        On submit: this change order is queued for the physician's
-        signature (fax pipeline). You can document against the new order
-        immediately — you don't have to wait for the signature.
+        <button
+          onClick={handleSubmitRequest}
+          disabled={!readyToSubmit() || submitting}
+          className={`w-full rounded-lg py-2.5 text-sm font-medium transition-colors ${
+            !readyToSubmit() || submitting
+              ? 'cursor-not-allowed bg-gray-200 text-gray-400'
+              : 'bg-gray-900 text-white hover:bg-gray-800'
+          }`}
+        >
+          {submitting ? 'Submitting…' : 'Submit request → call for verbal'}
+        </button>
+      </div>
+    );
+  }
+
+  // ─── Render: PHASE 2 — awaiting verbal call ──────────────────
+  if (phase === 'awaiting_verbal') {
+    return (
+      <div className="rounded-xl border border-amber-300 bg-white p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <div>
+            <p className="text-[10px] font-semibold tracking-widest text-amber-700 uppercase">
+              Step 2 of 2 · Verbal approval needed
+            </p>
+            <h4 className="mt-1 text-sm font-semibold text-gray-900">
+              Call to obtain verbal authorization
+            </h4>
+            <p className="mt-0.5 text-[11px] text-gray-500">
+              The request is saved. Tap a contact to call, then log the verbal below.
+            </p>
+          </div>
+          <button onClick={onCancel} className="text-gray-400 hover:text-gray-600">
+            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        {/* Two contact cards side-by-side. Each is a tap-to-call link
+            AND selects the "who I called" radio for the log-verbal POST. */}
+        <div className="mb-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <ContactCard
+            contact={HQ_CONTACT}
+            badge="HQ"
+            selected={contactCalled === 'hq'}
+            onSelect={() => setContactCalled('hq')}
+          />
+          <ContactCard
+            contact={physician}
+            badge="Physician"
+            selected={contactCalled === 'physician'}
+            onSelect={() => setContactCalled('physician')}
+          />
+        </div>
+
+        {/* Log-verbal mini-form */}
+        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3">
+          <p className="mb-2 text-[10px] font-semibold tracking-widest text-gray-500 uppercase">
+            Log the verbal approval
+          </p>
+
+          <div className="mb-2 grid grid-cols-2 gap-2">
+            <div>
+              <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
+                I called
+              </label>
+              <div className="flex gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setContactCalled('hq')}
+                  className={`flex-1 rounded-md px-2 py-1.5 text-[11px] font-medium ${
+                    contactCalled === 'hq'
+                      ? 'bg-gray-900 text-white'
+                      : 'bg-white text-gray-700 ring-1 ring-gray-200'
+                  }`}
+                >
+                  HQ
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setContactCalled('physician')}
+                  className={`flex-1 rounded-md px-2 py-1.5 text-[11px] font-medium ${
+                    contactCalled === 'physician'
+                      ? 'bg-gray-900 text-white'
+                      : 'bg-white text-gray-700 ring-1 ring-gray-200'
+                  }`}
+                >
+                  Physician
+                </button>
+              </div>
+            </div>
+            <div>
+              <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
+                Verbal obtained at <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="time"
+                value={verbalTime}
+                onChange={(e) => setVerbalTime(e.target.value)}
+                className="w-full rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-xs tabular-nums text-gray-900 outline-none focus:border-gray-300"
+              />
+            </div>
+          </div>
+
+          <label className="mb-0.5 block text-[10px] font-medium text-gray-500 uppercase">
+            Note <span className="font-normal normal-case text-gray-400">(optional)</span>
+          </label>
+          <input
+            type="text"
+            value={verbalNote}
+            onChange={(e) => setVerbalNote(e.target.value)}
+            placeholder="e.g. Spoke with Dr. Patel; approved new dose."
+            className="w-full rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 outline-none focus:border-gray-300"
+          />
+
+          {error && (
+            <p className="mt-2 rounded-md border border-rose-200 bg-rose-50 px-2 py-1.5 text-[11px] text-rose-700">
+              {error}
+            </p>
+          )}
+
+          <button
+            onClick={handleLogVerbal}
+            disabled={loggingVerbal}
+            className={`mt-3 w-full rounded-lg py-2 text-sm font-medium transition-colors ${
+              loggingVerbal
+                ? 'cursor-not-allowed bg-gray-200 text-gray-400'
+                : 'bg-amber-600 text-white hover:bg-amber-700'
+            }`}
+          >
+            {loggingVerbal ? 'Logging…' : 'Log verbal approval'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ─── Render: PHASE 3 — verbal logged ─────────────────────────
+  return (
+    <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+      <div className="mb-2 flex items-center gap-2">
+        <svg className="h-5 w-5 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+        </svg>
+        <h4 className="text-sm font-semibold text-emerald-900">Verbal approval logged</h4>
+      </div>
+      <p className="mb-3 text-[11px] leading-snug text-emerald-900">
+        The change order is recorded with verbal authorization from{' '}
+        {contactCalled === 'hq' ? 'HQ' : physician.name}. The audit trail captures the call and the time obtained.
       </p>
-
-      {error && (
-        <p className="mb-2 rounded-md border border-rose-200 bg-rose-50 px-2 py-1.5 text-[11px] text-rose-700">
-          {error}
-        </p>
-      )}
-
       <button
-        onClick={handleSubmit}
-        disabled={!readyToSubmit() || submitting}
-        className={`w-full rounded-lg py-2.5 text-sm font-medium transition-colors ${
-          !readyToSubmit() || submitting
-            ? 'cursor-not-allowed bg-gray-200 text-gray-400'
-            : 'bg-gray-900 text-white hover:bg-gray-800'
-        }`}
+        onClick={onCancel}
+        className="w-full rounded-lg bg-emerald-700 py-2 text-sm font-medium text-white hover:bg-emerald-800"
       >
-        {submitting ? 'Submitting…' : 'Submit change order'}
+        Done
       </button>
     </div>
+  );
+}
+
+// Phone card surfaced during the verbal-call phase. The whole tile
+// is a tel: link, but a parallel click handler also selects this
+// contact as "who I called" so the log-verbal POST routes correctly
+// even if the nurse taps once on her phone instead of long-pressing.
+interface ContactCardProps {
+  contact: { name: string; subtitle: string; phone: string };
+  badge: string;
+  selected: boolean;
+  onSelect: () => void;
+}
+
+function ContactCard({ contact, badge, selected, onSelect }: ContactCardProps) {
+  // The whole card is a `tel:` anchor — tapping anywhere initiates the
+  // call on a mobile device. The visual treatment leans hard on
+  // "this is a call button" so the nurse never wonders what tapping
+  // does: amber-filled card, persistent "Tap to call" caption, a Call
+  // pill on the right side that hovers/inverts on press.
+  return (
+    <a
+      href={telHref(contact.phone)}
+      onClick={onSelect}
+      aria-label={`Call ${contact.name} at ${contact.phone}`}
+      className={`group block cursor-pointer rounded-xl border-2 transition-all active:scale-[0.98] ${
+        selected
+          ? 'border-amber-500 bg-amber-50 shadow-sm'
+          : 'border-amber-200 bg-white hover:border-amber-400 hover:bg-amber-50/70 hover:shadow-sm'
+      }`}
+    >
+      {/* Header strip: badge + "Tap to call" caption */}
+      <div className="flex items-center justify-between gap-2 border-b border-amber-100 px-3 pt-2 pb-1.5">
+        <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] font-semibold tracking-widest text-amber-800 uppercase">
+          {badge}
+        </span>
+        <span className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-amber-700">
+          <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 5a2 2 0 0 1 2-2h2.28a2 2 0 0 1 1.94 1.515l.7 2.793a2 2 0 0 1-.45 1.952L7.91 11.09a16 16 0 0 0 5 5l1.83-1.56a2 2 0 0 1 1.95-.45l2.79.7A2 2 0 0 1 21 16.72V19a2 2 0 0 1-2 2A16 16 0 0 1 3 5Z" />
+          </svg>
+          Tap to call
+        </span>
+      </div>
+
+      <div className="flex items-center gap-3 px-3 py-3">
+        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-amber-600 text-white shadow-sm transition-transform group-hover:scale-105 group-active:scale-95">
+          <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 5a2 2 0 0 1 2-2h2.28a2 2 0 0 1 1.94 1.515l.7 2.793a2 2 0 0 1-.45 1.952L7.91 11.09a16 16 0 0 0 5 5l1.83-1.56a2 2 0 0 1 1.95-.45l2.79.7A2 2 0 0 1 21 16.72V19a2 2 0 0 1-2 2A16 16 0 0 1 3 5Z" />
+          </svg>
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold leading-tight text-gray-900">{contact.name}</p>
+          <p className="mt-0.5 text-[11px] leading-tight text-gray-500">{contact.subtitle}</p>
+          <p className="mt-1 text-[13px] font-bold tabular-nums text-amber-700">{contact.phone}</p>
+        </div>
+      </div>
+
+      {/* "Call now" CTA pill at the bottom — looks like a button so the
+          tap target reads unambiguously as an action. */}
+      <div className="border-t border-amber-100 px-3 py-2">
+        <div className="flex items-center justify-center gap-1.5 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors group-hover:bg-amber-700">
+          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 5a2 2 0 0 1 2-2h2.28a2 2 0 0 1 1.94 1.515l.7 2.793a2 2 0 0 1-.45 1.952L7.91 11.09a16 16 0 0 0 5 5l1.83-1.56a2 2 0 0 1 1.95-.45l2.79.7A2 2 0 0 1 21 16.72V19a2 2 0 0 1-2 2A16 16 0 0 1 3 5Z" />
+          </svg>
+          Call {badge.toLowerCase()}
+        </div>
+      </div>
+
+      {selected && (
+        <p className="border-t border-amber-200 bg-amber-100/70 px-3 py-1 text-center text-[10px] font-semibold uppercase tracking-widest text-amber-800">
+          ✓ Selected as who I called
+        </p>
+      )}
+    </a>
   );
 }
 

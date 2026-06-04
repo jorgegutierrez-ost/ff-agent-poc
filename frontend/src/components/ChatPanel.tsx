@@ -15,6 +15,9 @@ import HeadToToeForm from './HeadToToeForm';
 import { useAudioRecorder, formatDuration } from '../hooks/useAudioRecorder';
 import { useAudioPlayer } from '../hooks/useAudioPlayer';
 
+type AudioRecorderControls = ReturnType<typeof useAudioRecorder>;
+type AudioPlayerControls = ReturnType<typeof useAudioPlayer>;
+
 interface ChatPanelProps {
   patientId: string;
   visitId: string;
@@ -23,6 +26,24 @@ interface ChatPanelProps {
   activeToolCall: string | null;
   activeForm: ActiveForm | null;
   lastLoadedMsgId: string | null;
+  /** When true, Aria's voice is force-muted: any in-flight TTS is
+   *  stopped and new agent messages are NOT spoken until the gate
+   *  lifts. Set by the visit page while a blocking modal (patient ID,
+   *  etc.) is open so background audio doesn't talk over the nurse. */
+  audioBlocked?: boolean;
+  /** Drawer open/closed state. Owned by the parent so the toggle
+   *  button can live in the visit footer beside the progress meter
+   *  instead of overlapping the close-out button on the right. */
+  chatOpen: boolean;
+  onChatOpenChange: (open: boolean) => void;
+  /** Shared audio recorder so the footer's press-and-hold Aria button
+   *  and the in-drawer "Talk to Aria" button drive the same mic
+   *  session (only one MediaRecorder can be active at a time). */
+  recorder: AudioRecorderControls;
+  /** Shared TTS player so the footer's Aria FAB can render the
+   *  speaking aura for the full audio-playback window (text streaming
+   *  ends well before audio finishes for long responses). */
+  tts: AudioPlayerControls;
   onSendMessage: (content: string) => void;
   onFormSubmit: (item: ScheduleItem, data: Record<string, string>) => void;
   onFormCancel: () => void;
@@ -56,6 +77,11 @@ export default function ChatPanel({
   activeToolCall,
   activeForm,
   lastLoadedMsgId,
+  audioBlocked = false,
+  chatOpen,
+  onChatOpenChange,
+  recorder,
+  tts,
   onSendMessage,
   onFormSubmit,
   onFormCancel,
@@ -64,28 +90,15 @@ export default function ChatPanel({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const recorder = useAudioRecorder(onSendMessage);
-  const tts = useAudioPlayer();
-
-  // Compact-layout state: at widths below the breakpoint (tablet
-  // portrait, narrow laptops) the chat collapses to a floating mic
-  // button bottom-right and slides up as an overlay when tapped. The
-  // full dashboard takes the visit canvas instead of fighting for 33%.
-  const COMPACT_BREAKPOINT_PX = 900;
-  const [isCompact, setIsCompact] = useState<boolean>(
-    typeof window !== 'undefined' ? window.innerWidth < COMPACT_BREAKPOINT_PX : false,
-  );
-  const [chatOpen, setChatOpen] = useState(false);
-  useEffect(() => {
-    const onResize = () => setIsCompact(window.innerWidth < COMPACT_BREAKPOINT_PX);
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
-  // Auto-open the drawer when Aria is streaming or a form is active —
-  // those are events the nurse needs to see immediately.
-  useEffect(() => {
-    if (isCompact && (isStreaming || activeForm)) setChatOpen(true);
-  }, [isCompact, isStreaming, activeForm]);
+  // Aria is always a floating drawer on every screen size. The
+  // schedule + cards get the full canvas; the toggle button lives in
+  // the visit footer (owned by the parent) and is positioned beside
+  // the progress meter, well away from the close-out button.
+  const isCompact = true;
+  const setChatOpen = onChatOpenChange;
+  // Auto-open behavior lives in VisitPage so push-to-talk turns can
+  // suppress just the streaming-triggered open without losing the
+  // activeForm-triggered open.
 
   // Mute deadline: null = not muted, 'forever' = until manually unmuted,
   // number = ms-since-epoch when the mute auto-expires.
@@ -195,14 +208,42 @@ export default function ChatPanel({
     }
   }, [lastLoadedMsgId]);
 
+  // Scroll the latest message/card into view whenever the chat updates
+  // OR the drawer opens. When the drawer mounts (chatOpen flips true),
+  // we need to wait a frame for layout to settle before scrolling,
+  // and we use 'auto' so the panel is already pinned to the bottom
+  // when the nurse sees it — not mid-scroll.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (!chatOpen) return;
+    const id = window.requestAnimationFrame(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [chatOpen]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [messages, activeToolCall, activeForm]);
+
+  // Hard mute while a blocking modal is open (e.g. patient ID gate).
+  // We stop any in-flight playback the moment the gate goes up, and
+  // mark the most recent agent message as "already spoken" so it
+  // doesn't auto-resume when the modal closes — per James's ask, only
+  // FRESH messages after closure should play. Re-firing the
+  // interrupted greeting would defeat the point of pausing it.
+  useEffect(() => {
+    if (!audioBlocked) return;
+    tts.stop?.();
+    const last = messages[messages.length - 1];
+    if (last && last.role === 'agent') {
+      lastSpokenIdRef.current = last.id;
+    }
+  }, [audioBlocked, messages, tts]);
 
   // Auto-play agent responses via TTS when streaming completes
   // Skip TTS for error messages to avoid wasting credits
   useEffect(() => {
-    if (isStreaming || !autoSpeak || messages.length === 0) return;
+    if (isStreaming || !autoSpeak || audioBlocked || messages.length === 0) return;
     const lastMsg = messages[messages.length - 1];
     if (
       lastMsg.role === 'agent' &&
@@ -213,7 +254,7 @@ export default function ChatPanel({
       lastSpokenIdRef.current = lastMsg.id;
       tts.playText(lastMsg.content);
     }
-  }, [isStreaming, messages, autoSpeak, tts]);
+  }, [isStreaming, messages, autoSpeak, audioBlocked, tts]);
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -270,6 +311,7 @@ export default function ChatPanel({
         <ChangeOrderForm
           item={item}
           visitId={visitId}
+          patientId={patientId}
           isHeaderInitiated={actionValue === 'change_order_new'}
           onSubmit={onFormSubmit}
           onCancel={onFormCancel}
@@ -321,33 +363,22 @@ export default function ChatPanel({
     return null;
   }
 
-  // When compact, render a floating FAB + an overlay drawer instead
-  // of inlining the panel. Returns nothing in flow-layout so the
-  // sibling schedule view can take the entire row width.
+  // When the drawer is closed we render nothing — the entry-point
+  // toggle lives in the visit footer (rendered by VisitPage) so it
+  // can sit beside the progress meter.
   if (isCompact && !chatOpen) {
-    return (
-      <button
-        type="button"
-        onClick={() => setChatOpen(true)}
-        aria-label="Open Aria chat"
-        className="fixed bottom-5 right-5 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-gray-900 text-white shadow-lg ring-4 ring-white transition-transform hover:scale-105"
-      >
-        <img src="/aria-avatar.png" alt="" className="h-10 w-10 rounded-full object-cover" />
-        {isStreaming && (
-          <span className="absolute -top-1 -right-1 flex h-3 w-3">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-indigo-400 opacity-75" />
-            <span className="relative inline-flex h-3 w-3 rounded-full bg-indigo-500" />
-          </span>
-        )}
-      </button>
-    );
+    return null;
   }
 
   return (
     <div
       className={
         isCompact
-          ? 'fixed inset-x-0 bottom-0 z-40 flex h-[85vh] flex-col rounded-t-2xl border-t border-gray-200 bg-white shadow-2xl'
+          ? // Floating chat widget anchored to the bottom-right, like a
+            // modern messenger. Stays narrow so the schedule + cards
+            // remain visible behind it. Width is capped on large screens
+            // and goes near-full-width only on very small phones.
+            'fixed bottom-20 right-5 z-40 flex h-[min(80vh,720px)] w-[min(calc(100vw-2.5rem),30rem)] flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl'
           : 'flex h-full w-1/3 shrink-0 flex-col border-l border-gray-200 bg-white'
       }
     >
@@ -361,8 +392,8 @@ export default function ChatPanel({
               aria-label="Close Aria"
               className="mr-1 flex h-8 w-8 items-center justify-center rounded-full text-gray-400 hover:bg-gray-100 hover:text-gray-700"
             >
-              <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
               </svg>
             </button>
           )}

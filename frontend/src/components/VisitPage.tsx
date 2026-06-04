@@ -1,4 +1,6 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
+import { useAudioRecorder } from '../hooks/useAudioRecorder';
+import { useAudioPlayer } from '../hooks/useAudioPlayer';
 import type { Patient, Visit, ChatMessage, ScheduleItem, SuctionEvent, SeizureEvent } from '../types';
 import type { ActiveForm } from './ChatPanel';
 import { API_BASE } from '../config';
@@ -86,6 +88,137 @@ export default function VisitPage({
     submitted_at: string;
   }>>([]);
   const [activeForm, setActiveForm] = useState<ActiveForm | null>(null);
+  // Aria drawer open/closed. Lifted from ChatPanel so the toggle
+  // button can live in the visit footer beside the progress meter,
+  // away from the close-out button. ChatPanel renders the drawer only
+  // when chatOpen is true; the FAB equivalent here is the inline pill.
+  const [chatOpen, setChatOpen] = useState(false);
+
+  // Push-to-talk turn flag. Set when the nurse releases a PTT press;
+  // stays true until Aria's response stream finishes, suppressing
+  // every auto-open trigger during that turn (streaming OR form
+  // activation). Cleared automatically on streaming end so the next
+  // typed or quick-action message resumes normal behavior.
+  const [pttTurnActive, setPttTurnActive] = useState(false);
+  const pttSendInFlightRef = useRef(false);
+  const wasStreamingRef = useRef(false);
+
+  // Wrap onSendMessage so the recorder's "send transcription" path
+  // can mark the resulting message as PTT-originated. Direct keyboard
+  // sends from the chat panel use the unwrapped onSendMessage.
+  const recorderOnSend = useCallback(
+    (text: string) => {
+      if (pttSendInFlightRef.current) {
+        pttSendInFlightRef.current = false;
+        setPttTurnActive(true);
+      }
+      onSendMessage(text);
+    },
+    [onSendMessage],
+  );
+
+  // Shared mic recorder so the footer's press-and-hold Aria button
+  // and the in-drawer talk button drive the same MediaRecorder.
+  const recorder = useAudioRecorder(recorderOnSend);
+
+  // Shared TTS player. Lifted from ChatPanel so the FAB aura can
+  // pulse for the full audio-playback window — text streaming
+  // finishes well before audio playback on multi-sentence replies.
+  const tts = useAudioPlayer();
+
+  // Detect the end of Aria's response stream (true → false) and
+  // clear the PTT turn flag so the next interaction resumes normal
+  // auto-open behavior.
+  useEffect(() => {
+    if (wasStreamingRef.current && !isStreaming) {
+      setPttTurnActive(false);
+    }
+    wasStreamingRef.current = isStreaming;
+  }, [isStreaming]);
+
+  // Auto-open the drawer when Aria streams a response or a form
+  // activates — but stay closed for the entire PTT turn so the
+  // nurse hears Aria's voice answer without the chat appearing.
+  useEffect(() => {
+    if (pttTurnActive) return;
+    if (isStreaming || activeForm) {
+      setChatOpen(true);
+    }
+  }, [isStreaming, activeForm, pttTurnActive]);
+
+  // Aria button has two gestures on one target:
+  //   - Quick tap (under 250 ms)        → toggle the drawer open/closed
+  //   - Press-and-hold (250 ms or more) → push-to-talk; release stops + sends
+  // We wire only pointer events (no onClick) so we control exactly when
+  // the toggle vs the recorder fires.
+  const PRESS_AND_HOLD_MS = 250;
+  const [pressingAria, setPressingAria] = useState(false);
+  const pressActiveRef = useRef(false);
+  const longPressTimerRef = useRef<number | null>(null);
+  const startedRecordingRef = useRef(false);
+
+  const clearLongPressTimer = () => {
+    if (longPressTimerRef.current !== null) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  };
+
+  const handleAriaPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLButtonElement>) => {
+      if (e.button !== 0) return;
+      pressActiveRef.current = true;
+      startedRecordingRef.current = false;
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        // best-effort; not all browsers honor capture on buttons
+      }
+      // Arm the long-press timer. If the user releases before it fires
+      // we treat the gesture as a tap (toggle drawer); if it fires we
+      // promote into push-to-talk mode.
+      longPressTimerRef.current = window.setTimeout(() => {
+        longPressTimerRef.current = null;
+        if (!pressActiveRef.current) return;
+        startedRecordingRef.current = true;
+        setPressingAria(true);
+        recorder.startRecording();
+      }, PRESS_AND_HOLD_MS);
+    },
+    [recorder],
+  );
+
+  const handleAriaPointerUp = useCallback(() => {
+    if (!pressActiveRef.current) return;
+    pressActiveRef.current = false;
+    clearLongPressTimer();
+    if (startedRecordingRef.current) {
+      // Push-to-talk release → stop and transcribe. Flag this message
+      // as PTT-originated so the auto-open effect skips it; the nurse
+      // hears Aria's voice answer without the drawer popping open.
+      startedRecordingRef.current = false;
+      setPressingAria(false);
+      pttSendInFlightRef.current = true;
+      recorder.stopRecording();
+    } else {
+      // Quick tap → toggle the drawer.
+      setChatOpen((open) => !open);
+    }
+  }, [recorder]);
+
+  const handleAriaPointerCancel = useCallback(() => {
+    if (!pressActiveRef.current) return;
+    pressActiveRef.current = false;
+    clearLongPressTimer();
+    if (startedRecordingRef.current) {
+      startedRecordingRef.current = false;
+      setPressingAria(false);
+      recorder.cancelRecording();
+    }
+  }, [recorder]);
+
+  // Drop in-flight state if the component unmounts mid-gesture.
+  useEffect(() => () => clearLongPressTimer(), []);
   // Identification gate. `null` = still loading, `false` = check not on
   // file (modal will block the visit), `true` = check is done (visit
   // proceeds normally). Modal will not render until we know which.
@@ -588,7 +721,14 @@ export default function VisitPage({
 
       const chatMsg = buildChatMessage(item, data);
       onSendMessage(chatMsg);
-      setActiveForm(null);
+
+      // Change-order requests use a submit-first verbal-call workflow:
+      // the form stays mounted after phase 1 so it can drive the
+      // verbal-approval phone card and the log-verbal step. The form
+      // closes itself via onCancel() once the nurse hits Done.
+      if (action !== 'change_order_submitted') {
+        setActiveForm(null);
+      }
     },
     [onSendMessage, visit.id],
   );
@@ -707,6 +847,13 @@ export default function VisitPage({
           activeToolCall={activeToolCall}
           activeForm={activeForm}
           lastLoadedMsgId={lastLoadedMsgId}
+          /* Hard-mute Aria while the ID modal is on screen so background
+             audio doesn't talk over the nurse filling the form. */
+          audioBlocked={identified !== true}
+          chatOpen={chatOpen}
+          onChatOpenChange={setChatOpen}
+          recorder={recorder}
+          tts={tts}
           onSendMessage={onSendMessage}
           onFormSubmit={handleFormSubmit}
           onFormCancel={handleFormCancel}
@@ -730,7 +877,22 @@ export default function VisitPage({
         if (!baselineVitalsDone) blockers.push('Baseline vitals');
         return (
           <div className="flex items-center justify-between gap-4 border-t border-gray-200 bg-white px-6 py-2.5">
-            <div className="flex min-w-0 items-center gap-3">
+            {/* Close-out lives on the LEFT now so the Aria toggle (right)
+                doesn't sit next to a destructive button. */}
+            <button
+              type="button"
+              onClick={handleExport}
+              disabled={!canCloseOut}
+              title={canCloseOut ? 'Export and close out the visit' : `Complete ${blockers.join(', ')} before sign-off`}
+              className={`min-h-11 shrink-0 rounded-lg px-5 py-2 text-sm font-semibold transition-colors ${
+                canCloseOut
+                  ? 'bg-gray-900 text-white hover:bg-gray-800'
+                  : 'cursor-not-allowed bg-gray-200 text-gray-400'
+              }`}
+            >
+              Close out visit
+            </button>
+            <div className="flex min-w-0 flex-1 items-center justify-end gap-3">
               <span className="text-xs font-semibold tabular-nums text-gray-700">
                 {completedCount}/{totalItems} complete
               </span>
@@ -745,23 +907,67 @@ export default function VisitPage({
                   Waiting on: {blockers.join(' · ')}
                 </span>
               )}
+              {/* Aria toggle — right side, beside progress. Tap = open/close drawer;
+                  press-and-hold (≥250 ms) = push-to-talk to Aria. */}
+              <div className="relative">
+                {/* Speaking aura — concentric pinging rings around the
+                    button while Aria is actively speaking. Bound to
+                    `isStreaming || tts.isPlaying` so the effect spans
+                    the FULL response: text streaming usually finishes
+                    well before audio finishes on longer answers, so
+                    we keep the aura on until the voice ends. */}
+                {(isStreaming || tts.isPlaying) && !pressingAria && (
+                  <>
+                    <span className="pointer-events-none absolute inset-0 -m-1 rounded-full bg-indigo-500/30 animate-ping" />
+                    <span
+                      className="pointer-events-none absolute inset-0 -m-2 rounded-full bg-indigo-400/20 animate-ping"
+                      style={{ animationDelay: '0.4s' }}
+                    />
+                    <span className="pointer-events-none absolute inset-0 -m-0.5 rounded-full ring-2 ring-indigo-400/70" />
+                  </>
+                )}
+                <button
+                  type="button"
+                  onPointerDown={handleAriaPointerDown}
+                  onPointerUp={handleAriaPointerUp}
+                  onPointerCancel={handleAriaPointerCancel}
+                  onContextMenu={(e) => e.preventDefault()}
+                  aria-label={chatOpen ? 'Close Aria chat (hold to talk)' : 'Open Aria chat (hold to talk)'}
+                  aria-pressed={chatOpen}
+                  style={{ touchAction: 'none', userSelect: 'none' }}
+                  className={`relative flex h-10 w-10 shrink-0 items-center justify-center rounded-full ring-2 ring-white shadow-md transition-colors ${
+                    pressingAria
+                      ? 'bg-rose-600 hover:bg-rose-600 ring-rose-200'
+                      : chatOpen
+                        ? 'bg-indigo-600 hover:bg-indigo-700'
+                        : 'bg-gray-900 hover:bg-gray-800'
+                  }`}
+                >
+                  <img src="/aria-avatar.png" alt="" className="h-8 w-8 rounded-full object-cover" />
+                </button>
+              </div>
             </div>
-            <button
-              type="button"
-              onClick={handleExport}
-              disabled={!canCloseOut}
-              title={canCloseOut ? 'Export and close out the visit' : `Complete ${blockers.join(', ')} before sign-off`}
-              className={`min-h-11 shrink-0 rounded-lg px-5 py-2 text-sm font-semibold transition-colors ${
-                canCloseOut
-                  ? 'bg-gray-900 text-white hover:bg-gray-800'
-                  : 'cursor-not-allowed bg-gray-200 text-gray-400'
-              }`}
-            >
-              Close out visit
-            </button>
           </div>
         );
       })()}
+
+      {/* Push-to-talk overlay — only while the Aria avatar is held. */}
+      {pressingAria && (
+        <div className="pointer-events-none fixed inset-0 z-30 flex items-end justify-end bg-gray-900/40 backdrop-blur-[1px]">
+          <div className="m-6 mb-24 rounded-2xl bg-white/95 px-5 py-4 shadow-2xl ring-1 ring-gray-200">
+            <div className="flex items-center gap-3">
+              <span className="relative flex h-3 w-3">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-rose-400 opacity-75" />
+                <span className="relative inline-flex h-3 w-3 rounded-full bg-rose-500" />
+              </span>
+              <div>
+                <p className="text-sm font-semibold text-gray-900">Aria is listening…</p>
+                <p className="text-[11px] text-gray-500">Release to send</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

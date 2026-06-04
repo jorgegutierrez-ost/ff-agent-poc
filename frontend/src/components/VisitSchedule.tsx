@@ -2,7 +2,7 @@ import { useState, useMemo } from 'react';
 import type { Patient, ScheduleItem, SuctionEvent } from '../types';
 import type { PrnOrder, LoggedMed } from './VisitPage';
 import { fuzzyMatch } from '../lib/medicationMatch';
-import { buildMedLine } from '../lib/medicationFormat';
+import { buildMedLine, ensureDoseUnit } from '../lib/medicationFormat';
 import {
   classifyScheduleItem,
   findBaselineVitalsId,
@@ -101,9 +101,28 @@ interface ScheduleCardProps {
    *  rendered for medications with 2+ scheduled times — singleton doses
    *  already show their time in the corner of the card. */
   allTimesToday?: string[];
+  /** Render the upgraded "focus" layout used for the top of the Due-Now
+   *  stack: bigger card, labeled detail grid, allergy cross-check,
+   *  bigger CTA. Non-meds also use the expanded chrome (taller card,
+   *  bolder type) but skip the med-specific rows. */
+  expanded?: boolean;
+  /** Allergens detected in the medication name. Surfaces a red cross-
+   *  check line on expanded med cards; ignored otherwise. */
+  allergyHits?: string[];
+  /** Patient has any allergies on file (not "no known allergies"). Used
+   *  to differentiate "no hits" (green "clear") from "no info" (omit). */
+  hasAllergiesOnFile?: boolean;
 }
 
-function ScheduleCard({ item, isOverdue, onQuickAction, allTimesToday }: ScheduleCardProps) {
+function ScheduleCard({
+  item,
+  isOverdue,
+  onQuickAction,
+  allTimesToday,
+  expanded = false,
+  allergyHits = [],
+  hasAllergiesOnFile = false,
+}: ScheduleCardProps) {
   const isDone = item.status === 'completed' || item.status === 'skipped';
 
   // Medication cards: render "Give <dose> (<concentration>) · <route>" in
@@ -128,15 +147,27 @@ function ScheduleCard({ item, isOverdue, onQuickAction, allTimesToday }: Schedul
   const showLateHint = isOverdue && !isIntervention;
   const effectiveOverdue = isOverdue && !isIntervention;
 
+  // Expanded "focus" treatment: bigger border + padding, slight shadow,
+  // a thin accent rail down the left so the eye lands on this card.
+  const cardClass = isDone
+    ? 'border-emerald-100 bg-emerald-50/50 animate-[completeCard_0.5s_ease-out]'
+    : effectiveOverdue
+      ? expanded
+        ? 'border-red-300 bg-white shadow-md ring-1 ring-red-100'
+        : 'border-red-200 bg-white'
+      : expanded
+        ? 'border-gray-300 bg-white shadow-md ring-1 ring-gray-100'
+        : 'border-gray-200 bg-white';
+  const padClass = expanded ? 'px-5 py-4' : 'px-4 py-3';
+  const accentClass = expanded && !isDone
+    ? effectiveOverdue
+      ? 'border-l-4 border-l-red-500'
+      : 'border-l-4 border-l-indigo-500'
+    : '';
+
   return (
     <div
-      className={`rounded-xl border px-4 py-3 transition-all duration-500 ${
-        isDone
-          ? 'border-emerald-100 bg-emerald-50/50 animate-[completeCard_0.5s_ease-out]'
-          : effectiveOverdue
-            ? 'border-red-200 bg-white'
-            : 'border-gray-200 bg-white'
-      }`}
+      className={`rounded-xl border ${padClass} ${accentClass} transition-all duration-500 ${cardClass}`}
     >
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-start gap-3 min-w-0 flex-1">
@@ -169,8 +200,9 @@ function ScheduleCard({ item, isOverdue, onQuickAction, allTimesToday }: Schedul
             </p>
             {/* Extra administration details — only meds have these fields,
                 and we only render rows when the underlying value exists so
-                non-med items and sparser records stay compact. */}
-            {isMed && (
+                non-med items and sparser records stay compact. Suppressed
+                in expanded mode; we render the richer label grid below. */}
+            {isMed && !expanded && (
               <div className={`mt-1 space-y-0.5 text-xs ${isDone ? 'text-gray-300' : 'text-gray-500'}`}>
                 {item.sublabel && (
                   <p>
@@ -228,9 +260,86 @@ function ScheduleCard({ item, isOverdue, onQuickAction, allTimesToday }: Schedul
         </div>
       </div>
 
+      {/* Expanded "focus" detail block — meds only. Lead with a single
+          big "Give X by Y" sentence so the nurse parses the order the
+          way she'd read a MAR line, not as disconnected label/value
+          rows. Concentration sits directly under as a helper since
+          it's only meaningful in relation to the dose. */}
+      {expanded && isMed && !isDone && (
+        <div className="mt-4 border-t border-gray-100 pt-3">
+          {/* Hero order line */}
+          {item.dose && (
+            <div className="mb-3 rounded-lg bg-gray-50 px-3 py-2.5">
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-gray-500">
+                Give
+              </p>
+              <p className="mt-0.5 text-lg font-bold leading-tight text-gray-900">
+                {ensureDoseUnit(item.dose, item.concentration)}
+                {item.route && (
+                  <span className="text-gray-500 font-medium"> · {item.route.toLowerCase()}</span>
+                )}
+              </p>
+              {item.concentration && (
+                <p className="mt-0.5 text-[11px] text-gray-500">
+                  <span className="font-medium text-gray-600">Concentration:</span>{' '}
+                  {item.concentration}
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Supporting details — only render rows whose underlying
+              value exists so non-PRN scheduled meds stay tight. */}
+          <dl className="grid grid-cols-[110px_1fr] gap-y-1.5 text-xs">
+            {item.indication && (
+              <>
+                <dt className="font-medium text-gray-500 uppercase tracking-wide text-[10px] self-center">For</dt>
+                <dd className="text-gray-700">{item.indication}</dd>
+              </>
+            )}
+            {item.sublabel && (
+              <>
+                <dt className="font-medium text-gray-500 uppercase tracking-wide text-[10px] self-center">Frequency</dt>
+                <dd className="text-gray-700">{item.sublabel}</dd>
+              </>
+            )}
+            {item.instructions && (
+              <>
+                <dt className="font-medium text-gray-500 uppercase tracking-wide text-[10px] self-center">Instructions</dt>
+                <dd className="text-gray-700">{item.instructions}</dd>
+              </>
+            )}
+          </dl>
+
+          {/* Allergy cross-check. Renders only when the patient has
+              allergies on file at all — silence is louder than a green
+              "clear" badge on a patient without recorded allergies. */}
+          {hasAllergiesOnFile && (
+            allergyHits.length > 0 ? (
+              <div className="mt-3 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2">
+                <svg className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m0-7.5a8.25 8.25 0 1 1 0 16.5 8.25 8.25 0 0 1 0-16.5Zm0 11.25h.008v.008H12v-.008Z" />
+                </svg>
+                <div className="text-[11px] leading-snug text-red-800">
+                  <span className="font-semibold">Allergy conflict:</span>{' '}
+                  {allergyHits.join(', ')} — verify before administering.
+                </div>
+              </div>
+            ) : (
+              <div className="mt-3 flex items-center gap-2 text-[11px] text-emerald-700">
+                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                </svg>
+                <span>Allergy cross-check: clear</span>
+              </div>
+            )
+          )}
+        </div>
+      )}
+
       {/* Quick actions — only show for pending/overdue items */}
       {!isDone && item.quickActions.length > 0 && (
-        <div className="mt-3 flex flex-wrap gap-2">
+        <div className={`mt-3 flex flex-wrap gap-2 ${expanded ? 'mt-4' : ''}`}>
           {item.quickActions.map((action) => (
             <button
               key={action.value}
@@ -238,7 +347,9 @@ function ScheduleCard({ item, isOverdue, onQuickAction, allTimesToday }: Schedul
                 e.stopPropagation();
                 onQuickAction(item, action.value);
               }}
-              className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+              className={`rounded-lg font-medium transition-colors ${
+                expanded ? 'px-4 py-2 text-sm' : 'px-3 py-1.5 text-xs'
+              } ${
                 action.variant === 'primary'
                   ? 'bg-gray-900 text-white hover:bg-gray-800'
                   : 'border border-gray-200 bg-white text-gray-700 hover:bg-gray-50'
@@ -392,11 +503,28 @@ function CheckInRow({
   );
 }
 
+// Naive allergen check: case-insensitive substring match between each
+// allergy and the medication name. Good enough for the obvious cases
+// the nurse panel called out (e.g. "Penicillin" → flags "Amoxicillin"
+// only via direct mention — a real drug-class lookup is out of scope
+// for the POC). False negatives are possible; the nurse still has to
+// verify. We never block on this; we only surface a warning.
+function findAllergyHits(medName: string, allergies: string[]): string[] {
+  if (!medName) return [];
+  const nameLower = medName.toLowerCase();
+  return allergies.filter((a) => {
+    const allergenLower = a.toLowerCase().trim();
+    if (!allergenLower) return false;
+    return nameLower.includes(allergenLower) || allergenLower.includes(nameLower.split(' ')[0]);
+  });
+}
+
 function ScheduleTab({
   items,
   suctionEvents,
   loggedMeds,
   headToToeDone,
+  allergies,
   onQuickAction,
   onQuickLog,
 }: {
@@ -404,9 +532,17 @@ function ScheduleTab({
   suctionEvents: SuctionEvent[];
   loggedMeds: LoggedMed[];
   headToToeDone: boolean;
+  allergies: string[];
   onQuickAction: (item: ScheduleItem, actionValue: string) => void;
   onQuickLog: (kind: 'suction' | 'seizure') => void;
 }) {
+  // Allergies the patient has on file, ignoring the "No Known Allergies"
+  // sentinel. Used by the expanded Due-Now card to flag conflicts.
+  const realAllergies = useMemo(
+    () => allergies.filter((a) => !/no known/i.test(a)),
+    [allergies],
+  );
+  const hasAllergiesOnFile = realAllergies.length > 0;
 
   const baselineVitalsId = useMemo(() => findBaselineVitalsId(items), [items]);
 
@@ -706,15 +842,27 @@ function ScheduleTab({
             </h3>
           </div>
           <div className="space-y-2">
-            {dueNow.map((item) => (
-              <ScheduleCard
-                key={item.id}
-                item={item}
-                isOverdue={item.status === 'overdue'}
-                onQuickAction={onQuickAction}
-                allTimesToday={timesFor(item)}
-              />
-            ))}
+            {dueNow.map((item, idx) => {
+              // Expand only the first due-now item — that's the
+              // top-of-stack action the nurse needs to take. The rest
+              // stay compact so the list doesn't dominate the screen.
+              const expand = idx === 0;
+              const hits = expand && item.type === 'medication'
+                ? findAllergyHits(item.label, realAllergies)
+                : [];
+              return (
+                <ScheduleCard
+                  key={item.id}
+                  item={item}
+                  isOverdue={item.status === 'overdue'}
+                  onQuickAction={onQuickAction}
+                  allTimesToday={timesFor(item)}
+                  expanded={expand}
+                  allergyHits={hits}
+                  hasAllergiesOnFile={hasAllergiesOnFile}
+                />
+              );
+            })}
           </div>
         </div>
       )}
@@ -1248,6 +1396,7 @@ export default function VisitSchedule({
             suctionEvents={suctionEvents}
             loggedMeds={loggedMeds}
             headToToeDone={headToToeDone}
+            allergies={patient.allergies ?? []}
             onQuickAction={onQuickAction}
             onQuickLog={onQuickLog}
           />
@@ -1260,22 +1409,6 @@ export default function VisitSchedule({
           />
         )}
         {tab === 'patient' && <PatientTab patient={patient} />}
-      </div>
-
-      {/* Footer bar */}
-      <div className="flex items-center justify-between border-t border-gray-200 bg-amber-50 px-6 py-3">
-        <div>
-          <span className="text-sm font-semibold text-gray-900">
-            {pendingCount} pending
-          </span>
-          <p className="text-xs text-gray-500">Verify all before closing</p>
-        </div>
-        <button
-          disabled={pendingCount > 0}
-          className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-900 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-300"
-        >
-          Close out visit
-        </button>
       </div>
     </div>
   );

@@ -27,6 +27,7 @@ import {
   getChangeOrdersForVisit,
   getChangeOrdersForPatient,
   markChangeOrderSigned,
+  logVerbalApproval,
   VALID_CHANGE_TYPES,
   VALID_SOURCE_TYPES,
 } from '../db/queries';
@@ -143,15 +144,22 @@ router.post('/:visitId/identification', async (req, res) => {
 // independent edits to the system list.
 
 // ─── Change orders ───────────────────────────────────────────
-// Nurse-initiated medication change request. The route enforces:
+// Nurse-initiated medication change request, submit-first flow per
+// James (2026-06-03): the nurse submits the request, then immediately
+// gets a phone prompt to call HQ or the physician on file for verbal
+// approval. The verbal-source fields (physician, obtained_at) are
+// filled in by a follow-up POST to /log-verbal once the call is made.
+//
+// The route enforces:
 //   1. A valid change_type (modify dose/route/frequency, discontinue, add)
-//   2. A documented source of authority (verbal/pharmacy_label/written_note)
-//   3. The source-specific fields the form requires (physician+timestamp
-//      for verbal, source_description for the others)
-// A field nurse cannot insert a row without a source, even if she
-// hand-crafts a POST — matching the meeting note "they do not want
-// nurses to be able to modify the dose, route, or otherwise create a
-// new order without approval."
+//   2. medication_name is non-empty
+//   3. source_type is 'verbal' on initial submit (the only path now);
+//      pharmacy_label and written_note remain valid for callers that
+//      supply a description (kept for backward compatibility but no
+//      longer reachable from the UI).
+// A field nurse still cannot finalize a verbal order independently —
+// the source_physician/source_obtained_at fields stay null until
+// /log-verbal is called, which is the gate James asked for.
 
 router.get('/:visitId/change-orders', async (req, res) => {
   try {
@@ -186,17 +194,15 @@ router.post('/:visitId/change-orders', async (req, res) => {
       res.status(400).json({ error: `source_type must be one of ${VALID_SOURCE_TYPES.join(', ')}` });
       return;
     }
-    // Source-specific minimums — these are the bare requirements for a
-    // legitimate physician order on file. Loose now; tighten if Renee
-    // calls out a gap.
-    if (sourceType === 'verbal') {
-      if (!body.source_physician || !body.source_obtained_at) {
-        res.status(400).json({ error: 'Verbal orders require physician and obtained-at timestamp.' });
+    // Source-specific minimums. The submit-first verbal flow no longer
+    // requires physician+timestamp up front — those land via /log-verbal
+    // after the nurse makes the call. Pharmacy label and written-note
+    // paths still require a description (legacy callers).
+    if (sourceType !== 'verbal') {
+      if (!body.source_description || String(body.source_description).trim() === '') {
+        res.status(400).json({ error: 'Pharmacy label and written-note sources require a description.' });
         return;
       }
-    } else if (!body.source_description || String(body.source_description).trim() === '') {
-      res.status(400).json({ error: 'Pharmacy label and written-note sources require a description.' });
-      return;
     }
     if (!body.medication_name || String(body.medication_name).trim() === '') {
       res.status(400).json({ error: 'medication_name is required.' });
@@ -250,6 +256,41 @@ router.post('/:visitId/change-orders/:changeOrderId/mark-signed', async (req, re
   } catch (err) {
     console.error('[visits/change-orders POST mark-signed] Error:', err);
     res.status(500).json({ error: 'Failed to mark change order signed' });
+  }
+});
+
+// Verbal-approval follow-up. Called after the nurse hits the phone
+// card and obtains verbal authorization. Fills in the source_physician
+// and source_obtained_at fields and stamps the routing decision into
+// notes so the audit trail records who was actually called.
+router.post('/:visitId/change-orders/:changeOrderId/log-verbal', async (req, res) => {
+  try {
+    const body = req.body ?? {};
+    const physician = String(body.source_physician ?? '').trim();
+    const obtainedAt = String(body.source_obtained_at ?? '').trim();
+    const contactCalled = body.contact_called;
+    if (!physician || !obtainedAt) {
+      res.status(400).json({ error: 'source_physician and source_obtained_at are required.' });
+      return;
+    }
+    if (contactCalled !== 'hq' && contactCalled !== 'physician') {
+      res.status(400).json({ error: "contact_called must be 'hq' or 'physician'." });
+      return;
+    }
+    const row = await logVerbalApproval(req.params.changeOrderId, {
+      source_physician: physician,
+      source_obtained_at: obtainedAt,
+      contact_called: contactCalled,
+      notes: body.notes ?? null,
+    });
+    if (!row) {
+      res.status(404).json({ error: 'Change order not found.' });
+      return;
+    }
+    res.json(row);
+  } catch (err) {
+    console.error('[visits/change-orders POST log-verbal] Error:', err);
+    res.status(500).json({ error: 'Failed to log verbal approval' });
   }
 });
 

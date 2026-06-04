@@ -941,6 +941,40 @@ export async function markChangeOrderSigned(id: string): Promise<ChangeOrderRow 
   return rows[0] ?? null;
 }
 
+// Records the verbal approval call that follows a submit-first change
+// order request. The change_order row already exists with source_type
+// 'verbal' and null physician/obtained_at; this UPDATE fills those in
+// and appends a "called HQ" / "called physician on file" line into
+// notes so the audit trail captures the routing decision.
+export async function logVerbalApproval(
+  id: string,
+  input: {
+    source_physician: string;
+    source_obtained_at: string;
+    contact_called: 'hq' | 'physician';
+    notes?: string | null;
+  },
+): Promise<ChangeOrderRow | null> {
+  const calledLine = input.contact_called === 'hq'
+    ? `Called HQ for verbal at ${input.source_obtained_at}.`
+    : `Called physician on file for verbal at ${input.source_obtained_at}.`;
+  const extraNote = input.notes && input.notes.trim() ? ` ${input.notes.trim()}` : '';
+  const appended = `${calledLine}${extraNote}`;
+  const { rows } = await pool.query(
+    `UPDATE change_orders
+        SET source_physician   = $2,
+            source_obtained_at = $3,
+            notes              = CASE
+              WHEN notes IS NULL OR notes = '' THEN $4
+              ELSE notes || E'\n' || $4
+            END
+      WHERE id = $1
+      RETURNING *`,
+    [id, input.source_physician, input.source_obtained_at, appended],
+  );
+  return rows[0] ?? null;
+}
+
 // ─── Seizure events ──────────────────────────────────────────
 // Per-event rows so the chart slices cleanly. KanTime fields:
 // occurred_at, duration, type (Absence/Atonic/.../Tonic-Clonic/Other),
